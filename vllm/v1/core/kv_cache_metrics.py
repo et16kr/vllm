@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""KV cache metrics tracking."""
+"""KV 캐시 메트릭 추적."""
 
 import random
 import time
@@ -14,13 +14,13 @@ from vllm.v1.metrics.stats import KVCacheEvictionEvent
 
 
 class BlockMetricsState:
-    """Tracks lifecycle metrics for a single KV cache block."""
+    """단일 KV 캐시 블록에 대한 수명주기 메트릭을 추적합니다."""
 
     def __init__(self):
         now_ns = time.monotonic_ns()
         self.birth_time_ns = now_ns
         self.last_access_ns = now_ns
-        # Bounded to prevent unbounded growth if a block is accessed many times.
+        # 블록이 여러 번 액세스되는 경우 무한한 증가를 방지하기 위해 제한됩니다.
         self.access_history: deque[int] = deque(maxlen=4)
 
     def record_access(self) -> None:
@@ -44,7 +44,7 @@ class BlockMetricsState:
 
 
 class KVCacheMetricsCollector:
-    """Collects KV cache residency metrics with sampling."""
+    """수집합니다. 샘플링을 통한 KV 캐시 상주 지표."""
 
     def __init__(self, sample_rate: float = 0.01):
         assert 0 < sample_rate <= 1.0, (
@@ -86,7 +86,7 @@ class KVCacheMetricsCollector:
         )
 
     def reset(self) -> None:
-        """Clear all state on cache reset."""
+        """캐시 재설정 시 모든 상태 지우기."""
         self.block_metrics.clear()
         self._eviction_events.clear()
 

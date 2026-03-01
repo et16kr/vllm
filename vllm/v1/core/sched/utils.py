@@ -6,34 +6,34 @@ from vllm.v1.request import Request, RequestStatus
 
 
 def remove_all(lst: list, items_to_remove: set) -> list:
-    """Remove all items from a list that are in the items_to_remove set.
+    """항목 제거 세트에 있는 목록에서 모든 항목을 제거합니다.
 
-    This method optimizes for the common case of removing a single item,
-    falling back to list comprehension for multiple items.
+    이 방법은 단일 항목을 제거하는 일반적인 경우에 최적화됩니다. item,
+    여러 항목에 대한 목록 이해로 돌아갑니다.
 
-    Args:
-        lst: The list to remove items from
-        items_to_remove: Set of items to remove
+    인수:
+        lst: 항목을 제거할 목록
+        items_to_remove: 제거할 항목 세트
 
-    Returns:
-        Either the modified original list (for single item removal) or
-        a new list (for multiple item removal). Callers should use the
-        returned value.
+    반환:
+        수정된 원본 목록(단일 항목 제거의 경우) 또는
+        새 목록(여러 항목 제거의 경우). 호출자는 
+        반환 값을 사용해야 합니다.
 
-    Note:
-        For single item removal, this modifies the original list in-place
-        and returns it. For multiple items, it creates and returns a new list.
+    참고:
+        단일 항목 제거의 경우 원래 목록을 내부에서 수정
+        하여 반환합니다. 여러 항목의 경우 새 목록을 생성하고 반환합니다.
     """
     if not items_to_remove:
         return lst
 
     if len(items_to_remove) == 1:
-        # Fast path for single item removal (most common case)
+        # 단일 항목 제거를 위한 빠른 경로(가장 일반적인 경우)
         item = next(iter(items_to_remove))
         with contextlib.suppress(ValueError):
             lst.remove(item)
         return lst
-    # For multiple items, use list comprehension
+    # 여러 항목의 경우 목록 이해를 사용합니다.
     return [item for item in lst if item not in items_to_remove]
 
 

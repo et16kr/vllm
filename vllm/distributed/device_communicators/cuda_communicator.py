@@ -42,7 +42,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             global_world_size,
         )
         if "tp" not in unique_name:
-            # custom allreduce or torch symm mem can be used only by tp
+            # custom allreduce 또는 torch symmetric memory는 tp에서만 사용할 수 있다.
             use_custom_allreduce = False
             use_torch_symm_mem = False
             use_flashinfer_allreduce = False
@@ -57,7 +57,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
 
-        # lazy import to avoid documentation build error
+        # 문서 빌드 오류를 피하기 위해 지연 import를 사용한다.
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce,
         )
@@ -97,7 +97,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             )
 
         if use_custom_allreduce and self.world_size > 1:
-            # Initialize a custom fast all-reduce implementation.
+            # custom fast all-reduce 구현을 초기화한다.
             self.ca_comm = CustomAllreduce(
                 group=self.cpu_group,
                 device=self.device,
@@ -107,11 +107,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             )
 
             if current_platform.is_rocm():
-                # Initialize a custom quick all-reduce implementation for AMD.
-                # Quick reduce is designed as a complement to custom allreduce.
-                # Based on quickreduce (https://github.com/mk1-project/quickreduce).
-                # If it's a rocm, 'use_custom_allreduce==True' means it must
-                # currently be an MI300 series.
+                # AMD용 custom quick all-reduce 구현을 초기화한다.
+                # Quick reduce는 custom allreduce를 보완하기 위해 설계되었다.
+                # quickreduce(https://github.com/mk1-project/quickreduce) 기반이다.
+                # rocm에서 'use_custom_allreduce==True'이면 현재는
+                # MI300 계열이어야 한다.
                 self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
 
         if self.use_all2all:
@@ -159,16 +159,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
             )
 
     def all_reduce(self, input_):
-        # since currently we perform copy input -> symm_input -> out-of-place AR
-        # return symm_output, we don't need to check if input is symmetric
+        # 현재 경로가 input 복사 -> symm_input -> out-of-place AR ->
+        # symm_output 반환 순서이므로, input이 symmetric인지 확인할 필요가 없다.
         if self.pynccl_comm is not None and should_nccl_symm_mem_allreduce(
             self.pynccl_comm.world_size, input_
         ):
             out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
             if out is not None:
                 return out
-        # always try quick reduce first, then flashinfer, then custom allreduce,
-        # and then pynccl. (quick reduce just for ROCM MI3*)
+        # 항상 quick reduce -> flashinfer -> custom allreduce -> pynccl 순서로 시도한다.
+        # (quick reduce는 ROCM MI3* 전용)
         qr_comm = self.qr_comm
         if (
             qr_comm is not None
@@ -209,10 +209,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
         assert pynccl_comm is not None
         out = pynccl_comm.all_reduce(input_)
         if out is None:
-            # fall back to the default all-reduce using PyTorch.
-            # this usually happens during testing.
-            # when we run the model, allreduce only happens for the TP
-            # group, where we always have either custom allreduce or pynccl.
+            # PyTorch 기본 all-reduce로 폴백한다.
+            # 보통 테스트 중에 발생한다.
+            # 실제 모델 실행에서는 allreduce가 TP 그룹에서만 발생하며,
+            # 해당 그룹은 항상 custom allreduce 또는 pynccl 중 하나를 사용한다.
             out = input_.clone()
             torch.distributed.all_reduce(out, group=self.device_group)
         return out
@@ -222,11 +222,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
         if dim < 0:
-            # Convert negative dim to positive.
+            # 음수 dim을 양수로 변환한다.
             dim += input_.dim()
 
-        # Note: This will produce an incorrect answer if we don't make
-        # the input_tensor contiguous. Possible bug in reduce_scatter_tensor?
+        # 주의: input_tensor를 contiguous로 만들지 않으면 결과가 틀릴 수 있다.
+        # reduce_scatter_tensor 쪽 버그 가능성이 있다.
         input_tensor = input_.movedim(0, dim).contiguous()
 
         assert input_tensor.shape[0] % world_size == 0
@@ -239,7 +239,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         pynccl_comm.reduce_scatter(output, input_tensor)
 
-        # Reshape before returning
+        # 반환 전에 shape을 복원한다.
         return output.movedim(0, dim).contiguous()
 
     def reduce_scatterv(
@@ -249,11 +249,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
         if dim < 0:
-            # Convert negative dim to positive.
+            # 음수 dim을 양수로 변환한다.
             dim += input_.dim()
 
-        # Note: This will produce an incorrect answer if we don't make
-        # the input_tensor contiguous. Possible bug in reduce_scatter_tensor?
+        # 주의: input_tensor를 contiguous로 만들지 않으면 결과가 틀릴 수 있다.
+        # reduce_scatter_tensor 쪽 버그 가능성이 있다.
         input_tensor = input_.movedim(0, dim).contiguous()
 
         if sizes is not None:
@@ -274,12 +274,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
         else:
             pynccl_comm.reduce_scatter(output, input_tensor)
 
-        # Reshape before returning
+        # 반환 전에 shape을 복원한다.
         return output.movedim(0, dim).contiguous()
 
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
-        """Sends a tensor to the destination rank in a blocking way"""
-        """NOTE: `dst` is the local rank of the destination rank."""
+        """텐서를 목적지 rank로 블로킹 방식으로 전송한다."""
+        """주의: `dst`는 목적지 rank의 local rank다."""
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
 
@@ -292,8 +292,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def recv(
         self, size: torch.Size, dtype: torch.dtype, src: int | None = None
     ) -> torch.Tensor:
-        """Receives a tensor from the source rank."""
-        """NOTE: `src` is the local rank of the source rank."""
+        """소스 rank에서 텐서를 수신한다."""
+        """주의: `src`는 소스 rank의 local rank다."""
         if src is None:
             src = (self.rank_in_group - 1) % self.world_size
 
@@ -306,7 +306,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         return tensor
 
     def broadcast(self, tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
-        """Broadcast a tensor from source rank to all ranks."""
+        """소스 rank의 텐서를 모든 rank로 브로드캐스트한다."""
         if self.world_size == 1:
             return tensor
 
@@ -341,8 +341,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None and not pynccl_comm.disabled
 
-        # 'sizes' is not needed if all inputs in the same group have the same
-        # shape
+        # 같은 그룹 내 모든 입력의 shape이 같다면 'sizes'는 필요 없다.
         if sizes is not None and all(s == sizes[0] for s in sizes):
             sizes = None
 
@@ -356,7 +355,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 output_size = (sum(sizes),) + input_size[1:]
             else:
                 output_size = (input_size[0] * world_size,) + input_size[1:]
-            # Allocate output tensor.
+            # 출력 텐서를 할당한다.
             output_tensor = torch.empty(
                 output_size, dtype=input_.dtype, device=input_.device
             )
@@ -388,8 +387,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
         """
-        Dispatch the hidden states and router logits to the appropriate device.
-        This is a no-op in the base class.
+        hidden states와 router logits를 적절한 디바이스로 디스패치한다.
+        베이스 클래스에서는 no-op이다.
         """
 
         assert self.all2all_manager is not None
@@ -412,8 +411,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
         """
-        Dispatch the hidden states and topk weights/ids to the appropriate device.
-        This is a no-op in the base class.
+        hidden states와 topk weights/ids를 적절한 디바이스로 디스패치한다.
+        베이스 클래스에서는 no-op이다.
         """
         assert self.all2all_manager is not None
         return self.all2all_manager.dispatch(
@@ -428,8 +427,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
         """
-        Combine the hidden states and router logits from the appropriate device.
-        This is a no-op in the base class.
+        적절한 디바이스에서 hidden states와 router logits를 결합한다.
+        베이스 클래스에서는 no-op이다.
         """
         assert self.all2all_manager is not None
         return self.all2all_manager.combine(

@@ -27,7 +27,7 @@ from vllm.v1.request import Request
 
 class KVCacheCoordinator(ABC):
     """
-    Coordinate the KV cache of different KV cache groups.
+    다양한 KV 캐시 그룹의 KV 캐시를 조정합니다.
     """
 
     def __init__(
@@ -54,7 +54,7 @@ class KVCacheCoordinator(ABC):
             metrics_collector,
         )
 
-        # Needs special handling for find_longest_cache_hit if eagle is enabled
+        # Eagle이 활성화된 경우 find_longest_cache_hit에 대한 특별한 처리가 필요합니다.
         self.use_eagle = use_eagle
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
@@ -78,29 +78,29 @@ class KVCacheCoordinator(ABC):
         num_tokens_main_model: int,
     ) -> int:
         """
-        Get the number of blocks needed to be allocated for the request.
+        요청에 할당되는 데 필요한 블록 수를 가져옵니다.
 
-        Args:
-            request_id: The request ID.
-            num_tokens: The total number of tokens that need a slot (including
-                tokens that are already allocated).
-            new_computed_blocks: The new computed blocks just hitting the
-                prefix caching.
-            num_encoder_tokens: The number of encoder tokens for allocating
-                blocks for cross-attention.
-            total_computed_tokens: Include both local and external tokens.
-            num_tokens_main_model: The number of tokens for the main model (aka target
-                model in spec decode). w/o spec decode, it is num_tokens;
-                with spec decode, it is num_tokens - num_lookahead_tokens.
+        인수:
+            request_id: 요청 ID입니다.
+            num_tokens: 슬롯이 필요한 총 토큰 수(포함)
+                이미 할당된 토큰).
+            new_computed_blocks: 새로 계산된 블록이 방금 도달했습니다.
+                접두사 캐싱.
+            num_encoder_tokens: 할당할 인코더 토큰 개수
+                교차주의를 위한 블록.
+            total_computed_tokens: 로컬 및 외부 토큰을 모두 포함합니다.
+            num_tokens_main_model: 메인 모델의 토큰 수(일명 target
+                사양 디코드의 모델). 사양 디코드가 없으면 num_tokens입니다.
+                사양 디코드의 경우 num_tokens - num_lookahead_tokens입니다.
 
-        Returns:
-            The number of blocks to allocate.
+        보고:
+            할당할 블록 수입니다.
         """
         num_blocks_to_allocate = 0
         for i, manager in enumerate(self.single_type_managers):
             if isinstance(manager, CrossAttentionManager):
-                # For cross-attention, we issue a single static allocation
-                # of blocks based on the number of encoder input tokens.
+                # 교차주의를 위해 단일 정적 할당을 발행합니다.
+                # 인코더 입력 토큰 수에 따른 블록 수입니다.
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                     request_id, num_encoder_tokens, [], 0, num_encoder_tokens
                 )
@@ -122,15 +122,15 @@ class KVCacheCoordinator(ABC):
         num_external_computed_tokens: int,
     ) -> None:
         """
-        Add the new computed blocks to the request. Optionally allocate new
-            blocks for external computed tokens (if any).
+        요청에 새로운 계산된 블록을 추가합니다. 선택적으로 새 할당
+            외부 계산 토큰에 대한 블록(있는 경우)
 
-        Args:
-            request_id: The request ID.
-            new_computed_blocks: The new computed blocks just hitting the
-                prefix cache.
-            num_local_computed_tokens: The number of local computed tokens.
-            num_external_computed_tokens: The number of external computed tokens.
+        인수:
+            request_id: 요청 ID입니다.
+            new_computed_blocks: 새로 계산된 블록이 방금 도달했습니다.
+                접두사 캐시.
+            num_local_computed_tokens: 로컬 계산 토큰 수입니다.
+            num_external_computed_tokens: 외부 계산 토큰 수입니다.
         """
         for i, manager in enumerate(self.single_type_managers):
             manager.allocate_new_computed_blocks(
@@ -148,21 +148,21 @@ class KVCacheCoordinator(ABC):
         num_encoder_tokens: int = 0,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
-        Allocate new blocks for the request to give it at least `num_tokens`
-        token slots.
+        요청에 최소한 'num_tokens'를 제공하도록 새 블록을 할당합니다.
+        토큰 슬롯.
 
-        Args:
-            request_id: The request ID.
-            num_tokens: The total number of tokens that need a slot (including
-                tokens that are already allocated).
-            num_tokens_main_model: The number of tokens for the main model (aka target
-                model in spec decode). w/o spec decode, it is num_tokens;
-                with spec decode, it is num_tokens - num_lookahead_tokens.
-            num_encoder_tokens: The number of encoder tokens for allocating
-                blocks for cross-attention.
+        인수:
+            request_id: 요청 ID입니다.
+            num_tokens: 슬롯이 필요한 총 토큰 수(포함)
+                이미 할당된 토큰).
+            num_tokens_main_model: 메인 모델의 토큰 수(일명 target
+                사양 디코드의 모델). 사양 디코드가 없으면 num_tokens입니다.
+                사양 디코드의 경우 num_tokens - num_lookahead_tokens입니다.
+            num_encoder_tokens: 할당할 인코더 토큰 개수
+                교차주의를 위한 블록.
 
-        Returns:
-            The new allocated blocks.
+        보고:
+            새로 할당된 블록입니다.
         """
         return tuple(
             manager.allocate_new_blocks(
@@ -177,38 +177,38 @@ class KVCacheCoordinator(ABC):
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """
-        Cache the blocks for the request.
+        요청에 대한 블록을 캐시합니다.
 
-        Args:
-            request: The request.
-            num_computed_tokens: The total number of tokens
-                that need to be cached
-                (including tokens that are already cached).
+        인수:
+            요청: 요청입니다.
+            num_computed_tokens: 총 토큰 수
+                캐시해야 하는 것
+                (이미 캐시된 토큰 포함)
         """
         for manager in self.single_type_managers:
             manager.cache_blocks(request, num_computed_tokens)
 
     def free(self, request_id: str) -> None:
         """
-        Free the blocks for the request.
+        요청에 대한 블록을 해제합니다.
 
-        Args:
-            request_id: The request ID.
+        인수:
+            request_id: 요청 ID입니다.
         """
         for manager in self.single_type_managers:
             manager.free(request_id)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
         """
-        Get the number of common prefix blocks for all requests with allocated
-        KV cache for each kv cache group.
+        할당된 모든 요청에 ​​대한 공통 접두사 블록 수를 가져옵니다.
+        각 kv 캐시 그룹에 대한 KV 캐시.
 
-        Args:
-            running_request_id: The request ID of any running request, used to
-                identify the common prefix blocks.
+        인수:
+            running_request_id: 실행 중인 요청의 요청 ID입니다.
+                공통 접두사 블록을 식별합니다.
 
-        Returns:
-            list[int]: The number of common prefix blocks for each kv cache group.
+        보고:
+            list[int]: 각 kv 캐시 그룹에 대한 공통 접두사 블록 수입니다.
         """
         return [
             manager.get_num_common_prefix_blocks(running_request_id)
@@ -219,20 +219,20 @@ class KVCacheCoordinator(ABC):
         self, request_id: str, total_computed_tokens: int
     ) -> None:
         """
-        Remove the blocks that are no longer needed from `blocks` and replace
-        the removed blocks with null_block.
+        '블록'에서 더 이상 필요하지 않은 블록을 제거하고 교체합니다.
+        null_block으로 제거된 블록.
 
-        Args:
-            request_id: The request ID.
-            total_computed_tokens: The total number of computed tokens, including
-                local computed tokens and external computed tokens.
+        인수:
+            request_id: 요청 ID입니다.
+            total_computed_tokens: 계산된 토큰의 총 개수입니다.
+                로컬 계산 토큰 및 외부 계산 토큰.
         """
         for manager in self.single_type_managers:
             manager.remove_skipped_blocks(request_id, total_computed_tokens)
 
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """
-        Get the blocks for the request.
+        요청에 대한 블록을 가져옵니다.
         """
         return tuple(
             manager.req_to_blocks.get(request_id) or []
@@ -248,17 +248,17 @@ class KVCacheCoordinator(ABC):
         pass
 
     def new_step_starts(self) -> None:
-        """Called when a new step is started."""
+        """새 단계가 시작될 때 호출됩니다."""
         for manager in self.single_type_managers:
             manager.new_step_starts()
 
 
 class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
     """
-    KV cache coordinator to use if prefix caching is disabled or unsupported.
-    In contrast to UnitaryKVCacheCoordinator and HybridKVCacheCoordinator,
-    supports arbitrary numbers of KV cache groups (including 0 groups).
-    Does not implement any features related to prefix caching.
+    접두사 캐싱이 비활성화되거나 지원되지 않는 경우 사용할 KV 캐시 코디네이터입니다.
+    UnitaryKVCacheCoordinator 및 HybridKVCacheCoordinator와 달리,
+    임의 개수의 KV 캐시 그룹(0개 그룹 포함)을 지원합니다.
+    접두사 캐싱과 관련된 기능을 구현하지 않습니다.
     """
 
     def __init__(
@@ -301,9 +301,9 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
 
 class UnitaryKVCacheCoordinator(KVCacheCoordinator):
     """
-    KV cache coordinator for models with only one KV cache group. This is the
-    case for models with only one KV cache type, e.g., all attention layers use
-    full attention or all attention layers use sliding window attention.
+    KV 캐시 그룹이 하나만 있는 모델을 위한 KV 캐시 코디네이터입니다. 이것은
+    KV 캐시 유형이 하나만 있는 모델의 경우(예: 모든 Attention 레이어 사용)
+    전체 주의 또는 모든 주의 레이어는 슬라이딩 윈도우 주의를 사용합니다.
     """
 
     def __init__(
@@ -337,8 +337,8 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             self.block_size *= dcp_world_size
         if pcp_world_size > 1:
             self.block_size *= pcp_world_size
-        # For models using only Mamba, block_size is set to max_model_len when
-        # prefix caching is disabled, and hash_block_size validation is skipped.
+        # Mamba만 사용하는 모델의 경우 block_size는 max_model_len으로 설정됩니다.
+        # 접두사 캐싱이 비활성화되고 hash_block_size 검증을 건너뜁니다.
         assert not enable_caching or (hash_block_size == self.block_size), (
             "UnitaryKVCacheCoordinator assumes hash_block_size == block_size"
         )
@@ -367,8 +367,8 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
 
 class HybridKVCacheCoordinator(KVCacheCoordinator):
     """
-    KV cache coordinator for hybrid models with multiple KV cache types, and
-    thus multiple kv cache groups.
+    여러 KV 캐시 유형을 갖춘 하이브리드 모델용 KV 캐시 코디네이터
+    따라서 여러 kv 캐시 그룹.
     """
 
     def __init__(
@@ -394,10 +394,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
         )
-        # hash_block_size: the block size used to compute block hashes.
-        # The actual block size usually equals hash_block_size, but in cases where
-        # different KV cache groups have different block sizes, the actual block size
-        # can be a multiple of hash_block_size.
+        # hash_block_size: 블록 해시를 계산하는 데 사용되는 블록 크기입니다.
+        # 실제 블록 크기는 일반적으로 hash_block_size와 동일하지만
+        # KV 캐시 그룹마다 블록 크기가 다르므로 실제 블록 크기는
+        # hash_block_size의 배수일 수 있습니다.
         self.hash_block_size = hash_block_size
         assert all(
             g.kv_cache_spec.block_size % hash_block_size == 0
@@ -409,8 +409,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """
-        Groups KV cache groups by their spec type for efficient batch processing
-        during cache hit lookup.
+        효율적인 일괄 처리를 위해 KV 캐시 그룹을 사양 유형별로 그룹화합니다.
+        캐시 적중 조회 중.
         """
         attention_groups: list[
             tuple[KVCacheSpec, list[int], type[SingleTypeKVCacheManager]]
@@ -420,7 +420,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             manager_cls = self.single_type_managers[i].__class__
             spec = g.kv_cache_spec
 
-            # Try to find an existing group with the same spec
+            # 동일한 사양을 가진 기존 그룹을 찾아보세요.
             for existing_spec, group_ids, existing_cls in attention_groups:
                 if existing_spec == spec:
                     assert manager_cls is existing_cls, (
@@ -435,18 +435,18 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             "HybridKVCacheCoordinator requires at least two attention groups."
         )
 
-        # Put full attention first: its efficient left-to-right scan provides
-        # a tighter initial bound, reducing work for subsequent groups.
+        # 완전한 주의를 최우선으로 생각하십시오. 효율적인 왼쪽에서 오른쪽 스캔은 다음을 제공합니다.
+        # 초기 경계가 더 엄격해져서 후속 그룹의 작업이 줄어듭니다.
         self.attention_groups = sorted(
             attention_groups,
             key=lambda x: not isinstance(x[0], FullAttentionSpec),
         )
 
-        # The LCM of the block sizes of all attention types.
-        # The cache hit length must be a multiple of the LCM of the block sizes
-        # to make sure the cache hit length is a multiple of the block size of
-        # each attention type. Requiring this because we don't support partial
-        # block cache hit yet.
+        # 모든 Attention 유형의 블록 크기에 대한 LCM입니다.
+        # 캐시 적중 길이는 블록 크기의 LCM의 배수여야 합니다.
+        # 캐시 적중 길이가 블록 크기의 배수인지 확인하십시오.
+        # 각 주의 유형. 부분적인 지원을 하지 않기 때문에 이것을 요구합니다.
+        # 아직 블록 캐시 히트가 발생하지 않았습니다.
         block_sizes = [spec.block_size for spec, _, _ in attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
 
@@ -456,21 +456,21 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """
-        Find the longest cache hit using an iterative fixed-point algorithm.
+        반복 고정 소수점 알고리즘을 사용하여 가장 긴 캐시 적중을 찾습니다.
 
-        Each attention type either accepts the current candidate length or
-        reduces it. If any type reduces the length, restart checks over all
-        types. This converges because length monotonically decreases and is
-        bounded below by 0.
+        각 관심 유형은 현재 후보 길이를 수락하거나
+        그것을 줄입니다. 어떤 유형이든 길이를 줄이면 전체 검사를 다시 시작합니다.
+        유형. 이는 길이가 단조롭게 감소하고 다음과 같기 때문에 수렴됩니다.
+        아래는 0으로 제한됩니다.
 
-        Args:
-            block_hashes: The block hashes of the request.
-            max_cache_hit_length: The maximum length of the cache hit.
+        인수:
+            block_hashes: 요청의 블록 해시입니다.
+            max_cache_hit_length: 캐시 적중의 최대 길이입니다.
 
-        Returns:
-            A tuple containing:
-                - A tuple of the cache hit blocks for each single type manager.
-                - The number of tokens of the longest cache hit.
+        보고:
+            다음을 포함하는 튜플:
+                - 각 단일 유형 관리자에 대한 캐시 적중 블록의 튜플입니다.
+                - 가장 긴 캐시 히트의 토큰 수입니다.
         """
 
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
@@ -484,12 +484,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hit_length = max_cache_hit_length
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
 
-        # Simple hybrid (1 full attn + 1 other): one iteration suffices.
-        # Full attn is always first if it exists. This avoids EAGLE drops
-        # being applied multiple times to non-full-attn groups.
-        # FIXME (yifan): However, for complex hybrid models with multiple attn
-        # groups, we still have the EAGLE spiral block dropping problem. See
-        # discussion in issue https://github.com/vllm-project/vllm/issues/32802.
+        # 단순 하이브리드(1개의 전체 속성 + 1개의 기타): 한 번의 반복으로 충분합니다.
+        # 전체 attn이 존재하는 경우 항상 첫 번째입니다. 이렇게 하면 EAGLE 방울이 방지됩니다.
+        # 전체 참여가 아닌 그룹에 여러 번 적용됩니다.
+        # FIXME(yifan): 단, 다중 속성을 갖는 복잡한 하이브리드 모델의 경우
+        # 그룹에서는 여전히 EAGLE 나선형 블록 삭제 문제가 있습니다. 보다
+        # 문제 https://github.com/vllm-project/vllm/issues/32802의 토론.
         is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
             self.attention_groups[0][0], FullAttentionSpec
         )
@@ -500,14 +500,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             for spec, group_ids, manager_cls in self.attention_groups:
                 is_full_attn = isinstance(spec, FullAttentionSpec)
 
-                # Full attention: reuse cached blocks (downward-closed property)
+                # 전체 주의: 캐시된 블록 재사용(하향 폐쇄 속성)
                 cached_blocks = hit_blocks_by_group[group_ids[0]]
                 if is_full_attn and cached_blocks is not None:
-                    # For full attention, we only need to compute the cache hit
-                    # length once. Starting from the second iteration, if the
-                    # curr_hit_length is reduced by other groups, we can simply
-                    # keep the first (curr_hit_length // block_size) blocks from
-                    # the last iteration.
+                    # 완전한 주의를 끌기 위해서는 캐시 적중만 계산하면 됩니다.
+                    # 길이는 한 번. 두 번째 반복부터 시작하면
+                    # curr_hit_length가 다른 그룹에 의해 줄어들면 간단히 다음과 같이 할 수 있습니다.
+                    # 첫 번째 (curr_hit_length // block_size) 블록을 유지하십시오.
+                    # 마지막 반복.
                     num_blocks = curr_hit_length // spec.block_size
                     curr_hit_length = num_blocks * spec.block_size
                 else:
@@ -527,11 +527,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if curr_hit_length >= hit_length:
                 break
             hit_length = curr_hit_length
-            # Simple hybrid: exit after one iteration
+            # 단순 하이브리드: 한 번의 반복 후 종료
             if is_simple_hybrid:
                 break
 
-        # Truncate full attention blocks to final hit_length (if present)
+        # 전체 주의 블록을 최종 hit_length로 자릅니다(있는 경우).
         spec, group_ids, _ = self.attention_groups[0]
         if isinstance(spec, FullAttentionSpec):
             num_blocks = hit_length // spec.block_size

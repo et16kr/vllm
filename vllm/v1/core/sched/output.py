@@ -39,7 +39,7 @@ class NewRequestData:
     lora_request: LoRARequest | None
     prompt_embeds: "torch.Tensor | None" = None
 
-    # Only used for v2 model runner.
+    # v2 Model Runner에서만 사용된다.
     prefill_token_ids: list[int] | None = None
 
     @classmethod
@@ -80,7 +80,7 @@ class NewRequestData:
             ")"
         )
 
-    # Version of __repr__ with the prompt data obfuscated
+    # 프롬프트 관련 민감 데이터를 숨긴 __repr__ 버전.
     def anon_repr(self) -> str:
         prompt_token_ids_len = (
             len(self.prompt_token_ids) if self.prompt_token_ids is not None else None
@@ -109,21 +109,20 @@ class NewRequestData:
 @dataclass
 class CachedRequestData:
     req_ids: list[str]
-    # For request ids not in resumed_req_ids, new_block_ids will be appended to
-    # the request's block IDs. For those in the set, new_block_ids will be used as the
-    # request's block IDs instead of appending to the existing block IDs.
+    # resumed_req_ids에 없는 요청은 기존 블록 뒤에 new_block_ids를 append한다.
+    # resumed_req_ids에 있는 요청은 new_block_ids를 전체 블록 테이블로 사용한다.
     resumed_req_ids: set[str]
-    # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
-    # When PP is not used, new_token_ids will be empty.
+    # NOTE(woosuk): new_token_ids는 pipeline parallelism에서만 사용한다.
+    # PP를 쓰지 않으면 빈 리스트다.
     new_token_ids: list[list[int]]
-    # For requests not scheduled in the last step, propagate the token ids to the
-    # connector. Won't contain requests that were scheduled in the prior step.
+    # 직전 스텝에 스케줄되지 않은 요청만 connector로 전체 토큰 ID를 보낸다.
+    # 이전 스텝에 이미 스케줄된 요청은 제외한다.
     all_token_ids: dict[str, list[int]]
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
 
-    # Version of dataclass repr with token IDs obfuscated.
+    # 토큰 ID를 난독화한 dataclass 표현.
     def anon_repr(self) -> str:
         new_token_ids_lens = [len(toks) for toks in self.new_token_ids]
         all_token_ids_lens = {
@@ -150,11 +149,10 @@ class CachedRequestData:
 
     @cached_property
     def _req_id_to_num_output_tokens(self) -> dict[str, int]:
-        """Cache mapping of req_id to num_output_tokens for O(1) lookup.
+        """req_id -> num_output_tokens 매핑을 O(1) 조회용으로 캐시한다.
 
-        This cached property is safe because CachedRequestData instances
-        are created fresh each scheduling iteration and not mutated during
-        computation of iteration details.
+        CachedRequestData 인스턴스는 스케줄링 반복마다 새로 생성되고,
+        반복 중에 변경되지 않으므로 캐시해도 안전하다.
         """
         return dict(zip(self.req_ids, self.num_output_tokens))
 
@@ -177,60 +175,57 @@ class CachedRequestData:
 
 @dataclass
 class SchedulerOutput:
-    # list of the requests that are scheduled for the first time.
-    # We cache the request's data in each worker process, so that we don't
-    # need to re-send it every scheduling step.
+    # 처음 스케줄되는 요청 목록.
+    # 요청 데이터는 워커 프로세스별로 캐시하므로
+    # 매 스케줄링 스텝마다 다시 보낼 필요가 없다.
     scheduled_new_reqs: list[NewRequestData]
-    # list of the requests that have been scheduled before.
-    # Since the request's data is already cached in the worker processes,
-    # we only send the diff to minimize the communication cost.
+    # 이전에 스케줄된 적이 있는 요청 목록.
+    # 해당 요청 데이터는 워커 측에 이미 캐시되어 있으므로
+    # 통신량을 줄이기 위해 diff만 전송한다.
     scheduled_cached_reqs: CachedRequestData
 
-    # req_id -> num_scheduled_tokens
-    # Number of tokens scheduled for each request.
+    # req_id -> num_scheduled_tokens 매핑
+    # 각 요청에 예약된 토큰 수.
     num_scheduled_tokens: dict[str, int]
-    # Total number of tokens scheduled for all requests.
-    # Equal to sum(num_scheduled_tokens.values())
+    # 모든 요청에 스케줄된 토큰 총합.
+    # sum(num_scheduled_tokens.values())와 동일.
     total_num_scheduled_tokens: int
-    # req_id -> spec_token_ids
-    # If a request does not have any spec decode tokens, it will not be
-    # included in the dictionary.
+    # req_id -> spec_token_ids 매핑
+    # spec decode 토큰이 없는 요청은 딕셔너리에 포함되지 않는다.
     scheduled_spec_decode_tokens: dict[str, list[int]]
-    # req_id -> encoder input indices that need processing.
-    # E.g., if a request has [0, 1], it could mean the vision encoder needs
-    # to process that the request's 0-th and 1-th images in the current step.
+    # req_id -> 처리해야 할 encoder 입력 인덱스.
+    # 예: [0, 1]이면 현재 스텝에서 해당 요청의 0, 1번 입력(예: 이미지)을
+    # encoder가 처리해야 함을 의미한다.
     scheduled_encoder_inputs: dict[str, list[int]]
-    # Number of common prefix blocks for all requests in each KV cache group.
-    # This can be used for cascade attention.
+    # 각 KV 캐시 그룹 기준 공통 접두사 블록 수.
+    # cascade attention에 활용될 수 있다.
     num_common_prefix_blocks: list[int]
 
-    # Request IDs that are finished in between the previous and the current
-    # steps. This is used to notify the workers about the finished requests
-    # so that they can free the cached states for those requests.
+    # 이전 스텝 이후 완료된 요청 ID.
+    # 워커가 해당 요청의 캐시 상태를 해제할 때 사용된다.
     finished_req_ids: set[str]
-    # list of mm_hash strings associated with the encoder outputs to be
-    # freed from the encoder cache.
+    # encoder 출력과 연관된 mm_hash 목록.
+    # encoder cache 해제에 사용된다.
     free_encoder_mm_hashes: list[str]
 
-    # Request IDs that are preempted in this step.
-    # Only used for v2 model runner.
+    # 이번 스텝에서 선점된 요청 ID.
+    # v2 Model Runner에서만 사용된다.
     preempted_req_ids: set[str] | None = None
 
-    # Whether any of the scheduled requests use structured output.
-    # Set only in async scheduling case.
+    # 스케줄된 요청 중 structured output 사용 여부.
+    # 비동기 스케줄링일 때만 설정된다.
     has_structured_output_requests: bool = False
 
-    # Whether the scheduled requests have all the output tokens they
-    # need to perform grammar bitmask computation.
+    # 문법 비트마스크 계산에 필요한 출력 토큰이 모두 준비됐는지 여부.
     pending_structured_output_tokens: bool = False
 
-    # Used for adjusting acceptance rate calculation.
+    # speculative decoding 수락률 계산 보정용.
     num_invalid_spec_tokens: dict[str, int] | None = None
 
-    # KV Cache Connector metadata.
+    # KV 캐시 커넥터 메타데이터.
     kv_connector_metadata: KVConnectorMetadata | None = None
 
-    # EC Cache Connector metadata
+    # EC 캐시 커넥터 메타데이터
     ec_connector_metadata: ECConnectorMetadata | None = None
 
     @classmethod
@@ -250,7 +245,7 @@ class SchedulerOutput:
 
 @dataclass
 class GrammarOutput:
-    # ids of structured output requests.
+    # 구조화된 출력 요청의 ID.
     structured_output_request_ids: list[str]
-    # Bitmask ordered as structured_output_request_ids.
+    # 비트마스크 행 순서는 structured_output_request_ids와 동일하다.
     grammar_bitmask: "npt.NDArray[np.int32]"

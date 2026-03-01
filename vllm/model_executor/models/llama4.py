@@ -16,7 +16,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only LLaMA model compatible with HuggingFace weights."""
+"""HuggingFace 가중치와 호환되는 추론 전용 LLaMA 모델."""
 
 from collections.abc import Iterable
 
@@ -75,7 +75,7 @@ class Llama4MoE(nn.Module):
         renormalize: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
-        # pseudo-standard is that the router scores are floats
+        # 관례적으로 router score는 float로 취급한다.
         router_scores = torch.sigmoid(router_scores.float())
         return (router_scores, router_indices.to(torch.int32))
 
@@ -113,7 +113,7 @@ class Llama4MoE(nn.Module):
             disable_tp=self.is_sequence_parallel,
         )
 
-        # Load balancing settings.
+        # 로드 밸런싱 설정.
         eplb_config = parallel_config.eplb_config if parallel_config else None
         self.enable_eplb = parallel_config.enable_eplb if parallel_config else False
         self.n_redundant_experts = (
@@ -194,12 +194,12 @@ class Llama4Attention(nn.Module):
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
         if self.total_num_kv_heads >= tp_size:
-            # Number of KV heads is greater than TP size, so we partition
-            # the KV heads across multiple tensor parallel GPUs.
+            # KV head 수가 TP 크기보다 크므로,
+            # KV head를 여러 tensor parallel GPU에 분할한다.
             assert self.total_num_kv_heads % tp_size == 0
         else:
-            # Number of KV heads is less than TP size, so we replicate
-            # the KV heads across multiple tensor parallel GPUs.
+            # KV head 수가 TP 크기보다 작으므로,
+            # KV head를 여러 tensor parallel GPU에 복제한다.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = config.head_dim
@@ -290,22 +290,21 @@ class Llama4Attention(nn.Module):
             q, k = self.rotary_emb(positions, q, k)
 
         if self.qk_norm is not None:
-            # Normalization is applied on the head_dim dimension. The rest of
-            # the dimensions are collapsed into a single dimension to support
-            # custom rms_norm cuda kernel.
+            # 정규화는 head_dim 차원에 적용한다. 나머지 차원은
+            # custom rms_norm CUDA 커널을 지원하기 위해
+            # 하나의 차원으로 펼친다.
             q = q.reshape(-1, self.head_dim)
             q = self.qk_norm(q.float()).reshape(-1, self.q_size).to(q.dtype)
             k = k.reshape(-1, self.head_dim)
             k = self.qk_norm(k.float()).reshape(-1, self.kv_size).to(k.dtype)
 
-        # We are applying temperature tuning (https://arxiv.org/abs/2501.19399)
-        # to NoPE layers, where the inference-time temperature tuning function
-        # is customized to not affect short context
-        # while working at very long context
+        # NoPE 레이어에는 temperature tuning(https://arxiv.org/abs/2501.19399)을
+        # 적용한다. 추론 시 사용하는 temperature tuning 함수는
+        # 짧은 컨텍스트에는 영향을 주지 않으면서
+        # 매우 긴 컨텍스트에서 동작하도록 맞춤화되어 있다.
         # https://arxiv.org/abs/2501.19399
         #
-        # We should apply temperature tuning between (after) rotary / QK norm
-        # and (before) attention.
+        # Temperature tuning은 rotary/QK norm 이후, attention 이전에 적용한다.
         if self.attn_temperature_tuning and self.nope:
             attn_scale = self._get_attn_scale(positions)
             q = (q * attn_scale).to(q.dtype)
@@ -373,7 +372,7 @@ class Llama4DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Self Attention
+        # 셀프 어텐션
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -381,7 +380,7 @@ class Llama4DecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
-        # Fully Connected
+        # 완전연결층
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual
@@ -412,71 +411,69 @@ class Llama4Model(LlamaModel):
         fused: bool = True,
     ) -> bool:
         """
-        Load MoE expert weights.
+        MoE 전문가 가중치를 로드한다.
 
         Args:
-            name: The name of the weight to load.
-            loaded_weight: The weight to load.
-            params_dict: The dictionary of module parameters.
-            loaded_params: The set of already loaded parameters.
-            expert_params_mapping: The mapping of expert parameters. Must be
-                generated by SharedFusedMoE.make_expert_params_mapping().
-            fused: Whether the expert weights are fused into a single weight
-                tensor or are separate weight tensors for each expert.
-                When fused is True, loaded_weight should have shape of:
-                [num_experts, hidden_in, hidden_out] for gate/up/down proj and
-                [hidden_out, hidden_in] for the others like router.
-                When fused is False, loaded_weight should have shape of:
-                [hidden_out, hidden_in].
+            name: 로드할 가중치 이름.
+            loaded_weight: 로드할 가중치 텐서.
+            params_dict: 모듈 파라미터 딕셔너리.
+            loaded_params: 이미 로드된 파라미터 이름 집합.
+            expert_params_mapping: 전문가 파라미터 매핑. 반드시
+                SharedFusedMoE.make_expert_params_mapping()으로 생성되어야 한다.
+            fused: 전문가 가중치가 단일 텐서로 fuse되어 있는지 여부.
+                False이면 전문가별 개별 텐서여야 한다.
+                fused=True인 경우 loaded_weight의 shape은 다음을 따른다:
+                gate/up/down proj: [num_experts, hidden_in, hidden_out]
+                router 등 기타: [hidden_out, hidden_in]
+                fused=False인 경우 loaded_weight의 shape:
+                [hidden_out, hidden_in]
 
         Returns:
-            True if loaded_weight is one of MoE weights and the MoE expert
-            weights are loaded successfully, False otherwise.
+            loaded_weight가 MoE 가중치이며 전문가 가중치 로딩에 성공하면 True,
+            그렇지 않으면 False.
         """
 
-        # Whether the MoE expert weights are loaded successfully.
+        # MoE 전문가 가중치 로딩 성공 여부.
         expert_param_loaded = False
 
-        # If fused is True, the loaded weight is in the layout of:
-        # [num_experts, hidden_in, hidden_out], so we must transpose the last
-        # two dimensions to match the expected layout of the parameters.
+        # fused=True이면 로드된 가중치 레이아웃이
+        # [num_experts, hidden_in, hidden_out]이므로, 마지막 두 차원을
+        # transpose해 파라미터 기대 레이아웃에 맞춘다.
         if fused and loaded_weight.ndim == 3:
             loaded_weight = loaded_weight.transpose(-1, -2)
 
-            # If the gate_proj and up_proj weights are fused into a single
-            # weight tensor, we need to split the weight tensor into a tuple
-            # of two weight tensors along the hidden_out dimension.
+            # gate_proj와 up_proj가 단일 텐서로 fuse된 경우,
+            # hidden_out 차원 기준으로 두 텐서 튜플로 분리한다.
             if "experts.gate_up_proj" in name:
                 loaded_weight = loaded_weight.chunk(2, dim=-2)
 
-        # Iterate over all the expert parameters and load the weights if we find
-        # a match in weight name.
+        # 모든 전문가 파라미터를 순회하면서
+        # 가중치 이름이 일치하면 로드한다.
         for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
-            # Get a view of the loaded_weight to avoid modifying the original
-            # one across iterations.
+            # 반복 간 원본 수정 방지를 위해 loaded_weight의 뷰를 사용한다.
             new_loaded_weight = loaded_weight
 
-            # If expert weights are fused into a single weight tensor, remove
-            # the expert index from the expected weight name.
+            # 전문가 가중치가 단일 텐서로 fuse된 경우, 기대 가중치 이름에서
+            # 전문가 인덱스를 제거한다.
             if fused:
-                # The string between e_str and proj_str is the expert index.
+                # e_str과 proj_str 사이 문자열이 전문가 인덱스다.
                 e_str, _, proj_str, _ = weight_name.split(".")
                 weight_name = f"{e_str}.{proj_str}"
                 param_name = f"{param_name}weight"
 
-            # Skip if the current weight is not one of the MoE weights.
+            # 현재 가중치가 MoE 가중치가 아니면 건너뛴다.
             if weight_name not in name:
                 continue
 
-            # Replace the weight name with the parameter name.
+            # 가중치 이름을 파라미터 이름으로 치환한다.
             full_param_name = name.replace(weight_name, param_name)
 
-            # Skip if the current weight corresponds to a parameter that
-            # does not exist on the current PP (pipeline parallel) rank.
+            # 현재 PP(pipeline parallel) rank에 존재하지 않는 파라미터면
+            # 건너뛴다.
             if is_pp_missing_parameter(name, self):
                 continue
 
-            # Skip if the current weight is for the bias.
+            # 현재 가중치가 bias이고 해당 파라미터가 없으면 건너뛴다.
             if (
                 name.endswith(".bias") or name.endswith("_bias")
             ) and name not in params_dict:
@@ -486,17 +483,15 @@ class Llama4Model(LlamaModel):
             weight_loader = param.weight_loader
 
             if fused:
-                # If the parameter is for w13 together, the corresponding weight
-                # will be a tuple, so we must select the correct weight
-                # depending on the shard id, which is either "w1" or "w3".
+                # 파라미터가 w13 통합 형태라면 대응 가중치는 튜플이므로,
+                # shard id("w1" 또는 "w3")에 따라 올바른 가중치를 선택한다.
                 if "w13" in full_param_name:
                     assert shard_id in ["w1", "w3"]
                     shard_idx = 0 if shard_id == "w1" else 1
                     new_loaded_weight = new_loaded_weight[shard_idx]
 
-                # If EP (expert parallel) is enabled, update expert_id to the
-                # starting expert index for the current EP rank and extract the
-                # corresponding expert weights.
+                # EP(expert parallel)가 활성화된 경우, expert_id를 현재 EP rank의
+                # 시작 전문가 인덱스로 갱신하고 해당 전문가 가중치만 추출한다.
                 layer_idx = extract_layer_index(name)
                 expert_map = self.layers[layer_idx].feed_forward.experts.expert_map
                 if expert_map is not None:
@@ -506,7 +501,7 @@ class Llama4Model(LlamaModel):
                         .flatten()
                         .to(new_loaded_weight.device)
                     )
-                    # Workaround for FP8 CPU indexing on older PyTorch:
+                    # 구버전 PyTorch의 FP8 CPU 인덱싱 우회 처리:
                     # https://github.com/vllm-project/vllm/issues/32862
                     is_fp8_dtype = new_loaded_weight.dtype == (
                         current_platform.fp8_dtype()
@@ -519,7 +514,7 @@ class Llama4Model(LlamaModel):
                         and is_fp8_dtype
                         and not is_torch_equal_or_newer("2.11.0")
                     ):
-                        # PyTorch < 2.11 doesn't support CPU float8 indexing.
+                        # PyTorch < 2.11은 CPU float8 인덱싱을 지원하지 않는다.
                         new_loaded_weight = new_loaded_weight.to(torch.float16)[
                             local_expert_indices
                         ].to(new_loaded_weight.dtype)
@@ -527,11 +522,10 @@ class Llama4Model(LlamaModel):
                         new_loaded_weight = new_loaded_weight[local_expert_indices]
                     expert_id = local_expert_indices[0].item()
             else:
-                # TODO: add EP support for non fused weights
+                # TODO: non-fused 가중치에 대한 EP 지원 추가
                 pass
 
-            # Load the weight into the module parameter with corresponding
-            # shard id and expert id.
+            # 대응 shard id와 expert id를 사용해 가중치를 모듈 파라미터에 로드한다.
             weight_loader(
                 param,
                 new_loaded_weight,
@@ -545,21 +539,19 @@ class Llama4Model(LlamaModel):
         return expert_param_loaded
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Name mapping from the parameter name to the shard name and
-        # corresponding shard id.
+        # 파라미터 이름을 shard 이름 및 shard id로 매핑한다.
         stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
+            # (파라미터 이름, shard 이름, shard id)
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
-        # Indicate whether the expert weights are fused into a single weight
-        # tensor.
+        # 전문가 가중치가 단일 텐서로 fuse되어 있는지 나타낸다.
         fused_experts_params = False
-        # Expert parameter mapping for the case where the expert weights are
-        # not fused into a single weight tensor.
+        # 전문가 가중치가 단일 텐서로 fuse되지 않은 경우의
+        # 전문가 파라미터 매핑.
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
@@ -568,8 +560,8 @@ class Llama4Model(LlamaModel):
             num_experts=self.num_experts,
             num_redundant_experts=self.n_redundant_experts,
         )
-        # Expert parameter mapping for the case where the expert weights are
-        # fused into a single weight tensor.
+        # 전문가 가중치가 단일 텐서로 fuse된 경우의
+        # 전문가 파라미터 매핑.
         expert_params_mapping_fused = SharedFusedMoE.make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_up_proj",
@@ -577,23 +569,22 @@ class Llama4Model(LlamaModel):
             ckpt_up_proj_name="gate_up_proj",
             num_experts=1,
         )
-        # All the module parameters.
+        # 모듈의 모든 파라미터.
         params_dict = dict(self.named_parameters())
-        # The module parameters that have been loaded.
+        # 로드가 완료된 모듈 파라미터 집합.
         loaded_params: set[str] = set()
 
-        # Iterate over all the weights and load them into module parameters.
+        # 모든 가중치를 순회하며 모듈 파라미터에 로드한다.
         for name, loaded_weight in weights:
-            # If the name contains "experts.gate_up_proj" or "experts.down_proj"
-            # without the expert indices, it means the expert weights are fused
-            # into a single weight tensor across all experts.
+            # 이름에 전문가 인덱스 없이 "experts.gate_up_proj" 또는
+            # "experts.down_proj"가 포함되면, 전문가 전체가 단일 텐서로
+            # fuse된 가중치로 간주한다.
             if "experts.gate_up_proj" in name or "experts.down_proj" in name:
                 fused_experts_params = True
                 expert_params_mapping = expert_params_mapping_fused
 
-            # If kv cache quantization scales exist and the weight name
-            # corresponds to one of the kv cache quantization scales, load
-            # them.
+            # KV 캐시 양자화 스케일이 존재하고 현재 이름이 그중 하나에 해당하면
+            # 해당 스케일을 로드한다.
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
             ):
@@ -606,38 +597,35 @@ class Llama4Model(LlamaModel):
                 loaded_params.add(scale_name)
                 continue
 
-            # Iterate over stacked_params_mapping to check if the current weight
-            # is one of the stacked parameters. If so, load the weight with the
-            # corresponding shard id. Note that MoE weights are handled
-            # separately in the else block.
+            # stacked_params_mapping을 순회하며 현재 가중치가 stacked 파라미터인지
+            # 확인한다. 해당하면 대응 shard id로 로드한다.
+            # MoE 가중치는 아래 else 블록에서 별도로 처리한다.
             for param_name, weight_name, shard_id in stacked_params_mapping:
-                # Skip if the current weight is not one of the stacked
-                # parameters or if the current weight is a MoE weight.
+                # 현재 가중치가 stacked 파라미터가 아니거나 MoE 가중치면 건너뛴다.
                 if weight_name not in name or "experts" in name:
                     continue
 
-                # For ModelOpt checkpoints, we need to rename the self_attn
-                # weight/weight_scale names except for kv cache scales.
+                # ModelOpt 체크포인트에서는 KV 캐시 scale을 제외한
+                # self_attn weight/weight_scale 이름을 재매핑한다.
                 if not (
                     name.endswith((".k_scale", ".v_scale")) and "self_attn" in name
                 ):
                     name = name.replace(weight_name, param_name)
 
-                # Skip if the current weight corresponds to a parameter that
-                # does not exist on the current PP (pipeline parallel) rank.
+                # 현재 PP(pipeline parallel) rank에 해당 파라미터가 없으면 건너뛴다.
                 if is_pp_missing_parameter(name, self):
                     continue
 
-                # Remap kv cache scale names for ModelOpt checkpoints.
-                # TODO: ModelOpt should implement get_cache_scale() such that
-                #       kv cache scale name remapping can be done there.
+                # ModelOpt 체크포인트용 KV 캐시 scale 이름 재매핑.
+                # TODO: ModelOpt에서 get_cache_scale()을 구현해
+                #       KV 캐시 scale 이름 재매핑을 그쪽에서 처리해야 한다.
                 if name.endswith("scale"):
                     name = maybe_remap_kv_scale_name(name, params_dict)
                     if name is None:
                         continue
 
-                # Load the weight into the module parameter with corresponding
-                # shard id and exit the for loop and the else block.
+                # 대응 shard id로 가중치를 로드하고,
+                # for 루프 및 else 블록 처리를 종료한다.
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
 
@@ -649,10 +637,10 @@ class Llama4Model(LlamaModel):
                 loaded_params.add(name)
                 break
 
-            # Handle normal (non-stacked) weights and MoE weights.
+            # 일반(non-stacked) 가중치와 MoE 가중치를 처리한다.
             else:
-                # First, try to load MoE weights using load_moe_expert_weights.
-                # If successful, move on to next loaded weight.
+                # 먼저 load_moe_expert_weights로 MoE 가중치 로드를 시도한다.
+                # 성공하면 다음 가중치로 진행한다.
                 if self.load_moe_expert_weights(
                     name,
                     loaded_weight,
@@ -663,14 +651,12 @@ class Llama4Model(LlamaModel):
                 ):
                     continue
 
-                # Skip if the current weight corresponds to a parameter that
-                # does not exist on the current PP (pipeline parallel) rank.
+                # 현재 PP(pipeline parallel) rank에 해당 파라미터가 없으면 건너뛴다.
                 if is_pp_missing_parameter(name, self):
                     continue
 
-                # Handle flat expert scale parameters that don't match
-                # per-expert patterns, i.e. one weight scale tensor for all
-                # experts.
+                # 전문가별 패턴과 매칭되지 않는 평탄(flat) expert scale 파라미터를
+                # 처리한다. 즉, 전문가 전체에 대해 scale 텐서 하나를 쓰는 경우다.
                 scale_names = [
                     "w13_input_scale",
                     "w13_weight_scale",
@@ -685,15 +671,14 @@ class Llama4Model(LlamaModel):
                         param, "weight_loader", default_weight_loader
                     )
 
-                    # If weight loader supports special moe loading, use it to
-                    # avoid expensive runtime reflection
+                    # weight loader가 특수 MoE 로딩을 지원하면
+                    # 비용이 큰 런타임 리플렉션을 피하기 위해 이를 사용한다.
                     if getattr(weight_loader, "supports_moe_loading", False):
-                        # Map the weight name to the corresponding shard id.
+                        # 가중치 이름을 대응 shard id로 매핑한다.
                         shard_id = "w2" if "w2_" in name else "w1"
 
-                        # Transpose if weight scales are FP8 block scales with
-                        # three dimensions:
-                        # [num_experts, hidden_in, hidden_out].
+                        # weight scale이 3차원 FP8 block scale
+                        # [num_experts, hidden_in, hidden_out]이면 transpose한다.
                         if (
                             name.endswith("weight_scale")
                             and loaded_weight.dtype == torch.float8_e4m3fn
@@ -701,27 +686,26 @@ class Llama4Model(LlamaModel):
                         ):
                             loaded_weight = loaded_weight.transpose(-1, -2)
 
-                        # Load the weight into the module parameter with
-                        # corresponding shard id and expert id.
+                        # 대응 shard id, expert id로 가중치를 모듈 파라미터에 로드한다.
                         weight_loader(
                             param, loaded_weight, name, shard_id=shard_id, expert_id=0
                         )
 
                     else:
-                        # Regular weight loader (handles both
-                        # param.weight_loader and default_weight_loader)
+                        # 일반 weight loader 사용
+                        # (param.weight_loader와 default_weight_loader 모두 지원).
                         weight_loader(param, loaded_weight)
 
                     loaded_params.add(name)
                     continue
 
-                # Handle normal (non-stacked, non-MoE) weights.
+                # 일반(non-stacked, non-MoE) 가중치 처리.
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
-        # Finally, return the set of loaded parameters.
+        # 최종적으로 로드된 파라미터 집합을 반환한다.
         return loaded_params
 
 
@@ -732,10 +716,10 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        # update temperature tuning config from generation config
+        # generation config를 기반으로 temperature tuning 설정을 갱신한다.
         gen_config = vllm_config.model_config.try_get_generation_config()
         gen_config.update(vllm_config.model_config.override_generation_config)
-        # enable temperature tuning by default when max_model_len > 32K
+        # max_model_len > 32K이면 기본값으로 temperature tuning을 활성화한다.
         default_attn_temperature_tuning = vllm_config.model_config.max_model_len > 32768
         vllm_config.model_config.hf_config.attn_temperature_tuning = gen_config.get(
             "attn_temperature_tuning", default_attn_temperature_tuning
@@ -744,7 +728,7 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         super().__init__(
             vllm_config=vllm_config, prefix=prefix, layer_type=Llama4DecoderLayer
         )
-        # Set MoE hyperparameters
+        # MoE 하이퍼파라미터 설정.
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
@@ -758,7 +742,7 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
 
             assert isinstance(layer, Llama4DecoderLayer)
             if isinstance(layer.feed_forward, Llama4MoE):
-                # Pick last one layer since the first ones may be dense layers.
+                # 앞부분은 dense 레이어일 수 있으므로 마지막 MoE 레이어를 기준으로 사용한다.
                 example_moe = layer.feed_forward
                 self.moe_layers.append(layer.feed_forward.experts)
 
@@ -829,15 +813,15 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         loaded_weight: torch.Tensor,
     ) -> tuple[str, torch.Tensor]:
         modules = name.split(".")
-        # Permute Q/K weights and corresponding scales for rotary embedding.
-        # This pathway is validated against modelopt and compressed-tensors ckpts,
-        # and for per-tensor, per-group (e.g. GPTQ), and per-channel quant schemes.
-        # Note: permutations are not feasible only for per-block (e.g. DeepSeek 128x128)
-        # For per-block quantization, consider not quantizing q/k_proj.
+        # rotary embedding에 맞게 Q/K 가중치와 대응 scale을 permute한다.
+        # 이 경로는 modelopt 및 compressed-tensors 체크포인트에서 검증되었고,
+        # per-tensor, per-group(예: GPTQ), per-channel 양자화 스킴을 지원한다.
+        # 참고: per-block(예: DeepSeek 128x128) 양자화에서는 permute가 사실상 어렵다.
+        # per-block 양자화라면 q/k_proj를 양자화하지 않는 방안을 고려한다.
         is_weight = modules[-1] in ("weight", "weight_packed")
         is_weight_scale = (
             modules[-1] == "weight_scale"
-            and loaded_weight.numel() > 1  # no need to permute per-tensor scales
+            and loaded_weight.numel() > 1  # per-tensor scale은 permute가 필요 없다.
         )
         is_k_proj = "wk" in modules or "k_proj" in modules
         is_q_proj = "wq" in modules or "q_proj" in modules

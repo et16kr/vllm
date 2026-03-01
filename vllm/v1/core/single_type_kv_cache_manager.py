@@ -27,8 +27,8 @@ from vllm.v1.request import Request
 
 class SingleTypeKVCacheManager(ABC):
     """
-    An abstract base class for a manager that handle the kv cache management
-    logic of one specific type of attention layer.
+    kv 캐시 관리를 처리하는 관리자에 대한 추상 기본 클래스
+    특정 유형의 주의 계층의 논리.
     """
 
     def __init__(
@@ -41,11 +41,11 @@ class SingleTypeKVCacheManager(ABC):
         pcp_world_size: int = 1,
     ) -> None:
         """
-        Initializes the SingleTypeKVCacheManager.
-        Args:
-            kv_cache_spec: The kv_cache_spec for this manager.
-            block_pool: The block pool.
-            kv_cache_group_id: The id of the kv cache group of this manager.
+        SingleTypeKVCacheManager를 초기화합니다.
+        인수:
+            kv_cache_spec: 이 관리자에 대한 kv_cache_spec.
+            block_pool: 블록 풀.
+            kv_cache_group_id: 이 관리자의 kv 캐시 그룹 ID.
         """
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
@@ -56,15 +56,14 @@ class SingleTypeKVCacheManager(ABC):
         self.block_pool = block_pool
         self.enable_caching = enable_caching
 
-        # Mapping from request ID to blocks to track the blocks allocated
-        # for each request, so that we can free the blocks when the request
-        # is finished.
+        # 각 요청의 할당 블록을 추적하기 위한 req_id -> blocks 매핑.
+        # 요청 완료 시 해당 블록을 해제할 때 사용한다.
         self.req_to_blocks: defaultdict[str, list[KVCacheBlock]] = defaultdict(list)
 
-        # {req_id: The number of cached blocks for this given request}
-        # This is used to track the number of cached blocks for each request.
-        # This is only used to track the RUNNING requests, we do not track the
-        # data for preempted ones.
+        # {req_id: 해당 요청에 대해 캐시된 블록 수}
+        # 이는 각 요청에 대해 캐시된 블록 수를 추적하는 데 사용됩니다.
+        # 이는 실행 중인 요청을 추적하는 데만 사용되며 선점된 요청에 대한 
+        # 데이터는 추적하지 않습니다.
         self.num_cached_block: dict[str, int] = {}
 
         self.kv_cache_group_id = kv_cache_group_id
@@ -83,56 +82,54 @@ class SingleTypeKVCacheManager(ABC):
         num_tokens_main_model: int,
     ) -> int:
         """
-        Get the number of blocks needed to be allocated for the request.
+        요청에 추가 할당해야 하는 블록 수를 계산합니다.
 
-        Args:
-            request_id: The request ID.
-            num_tokens: The total number of tokens that need a slot (including
-                tokens that are already allocated).
-            new_computed_blocks: The new computed blocks just hitting the
-                prefix caching.
-            total_computed_tokens: Include both local and external computed
-                tokens.
-            num_tokens_main_model: The number of tokens for the main model (aka target
-                model in spec decode). w/o spec decode, it is num_tokens;
-                with spec decode, it is num_tokens - num_lookahead_tokens.
+        인수:
+            request_id: 요청 ID.
+            num_tokens: 슬롯이 필요한 총 토큰 수
+                (이미 할당된 토큰 포함).
+            new_computed_blocks: prefix cache hit로 새로 확정된 블록들.
+            total_computed_tokens: 로컬/외부 계산 토큰을 모두 포함한
+                총 계산 토큰 수.
+            num_tokens_main_model: 메인 모델 기준 토큰 수.
+                speculative decoding이 없으면 `num_tokens`와 같고,
+                있으면 `num_tokens - num_lookahead_tokens`입니다.
 
-        Returns:
-            The number of blocks to allocate.
+        반환:
+            할당할 블록 수입니다.
         """
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
         num_req_blocks = len(self.req_to_blocks.get(request_id, ()))
 
         if request_id in self.num_cached_block:
-            # Fast-path: a running request won't have any new prefix-cache hits.
+            # 빠른 경로: 실행 중인 요청은 새 prefix cache hit가 없다.
             assert len(new_computed_blocks) == 0
-            # NOTE: With speculative decoding, request's blocks may be allocated
-            # for draft tokens which are later rejected. In this case,
-            # num_required_blocks may be smaller than num_req_blocks.
+            # speculative decoding에서는 나중에 거부될 draft 토큰용 블록이
+            # 미리 잡혀 있을 수 있으므로, num_required_blocks가 더 작아질 수 있다.
             return max(num_required_blocks - num_req_blocks, 0)
 
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
         num_local_computed_blocks = len(new_computed_blocks) + num_req_blocks
-        # Number of whole blocks that are skipped by the attention window.
-        # If nothing is skipped, this is 0.
+        # 주의 창에서 건너뛴 전체 블록 수.
+        # 아무것도 건너뛰지 않은 경우 이는 0입니다.
         num_skipped_blocks = num_skipped_tokens // self.block_size
-        # We need blocks for the non-skipped suffix. If there are still
-        # local-computed blocks inside the window, they contribute to the
-        # required capacity; otherwise, skipped blocks dominate.
+        # 실제로 새 블록이 필요한 구간은 "건너뛰는 prefix 이후"의 suffix다.
+        # 창 내부에 남아 있는 로컬 계산 블록 수와 건너뛴 블록 수 중 큰 값을
+        # 기준으로 이미 커버된 범위를 계산한다.
         num_new_blocks = max(
             num_required_blocks - max(num_skipped_blocks, num_local_computed_blocks),
             0,
         )
 
-        # Among the `new_computed_blocks`, the first `num_skipped_blocks` worth
-        # of blocks are skipped; `num_req_blocks` of those may already be in
-        # `req_to_blocks`, so only skip the remainder from `new_computed_blocks`.
+        # `new_computed_blocks` 기준으로는 첫 `num_skipped_blocks`가 skip 대상이지만,
+        # 그중 일부는 이미 `req_to_blocks`에 포함되어 있을 수 있다.
+        # 따라서 `new_computed_blocks`에서 실제로 더 건너뛸 개수만 계산한다.
         num_skipped_new_computed_blocks = max(0, num_skipped_blocks - num_req_blocks)
 
-        # If a computed block is an eviction candidate (in the free queue and
-        # ref_cnt == 0), it will be removed from the free queue when touched by
-        # the allocated request, so we must count it in the free-capacity check.
+        # 계산 블록이 퇴출 후보(free queue + ref_cnt == 0)였다면,
+        # 이번 요청에서 touch되면서 free queue에서 빠진다.
+        # 따라서 가용 용량 계산 시 evictable 블록 수도 함께 반영한다.
         num_evictable_blocks = self._get_num_evictable_blocks(
             new_computed_blocks[num_skipped_new_computed_blocks:]
         )
@@ -146,28 +143,28 @@ class SingleTypeKVCacheManager(ABC):
         num_external_computed_tokens: int,
     ) -> None:
         """
-        Add the new computed blocks to the request. This involves three steps:
-        1. Touch the computed blocks to make sure they won't be evicted.
-        1.5. (Optional) For sliding window, skip blocks are padded with null blocks.
-        2. Add the remaining computed blocks.
-        3. (Optional) For KV connectors, allocate new blocks for external computed
-            tokens (if any).
+        새로 계산된 블록을 요청에 반영합니다.
 
-        Args:
-            request_id: The request ID.
-            new_computed_blocks: The new computed blocks just hitting the
-                prefix cache.
-            num_local_computed_tokens: The number of local computed tokens.
-            num_external_computed_tokens: The number of external computed tokens.
+        처리 순서:
+        1. 계산 블록을 touch하여 퇴출되지 않게 한다.
+        2. (필요 시) sliding window로 skip되는 구간을 null block으로 채운다.
+        3. 남은 계산 블록을 요청 블록 테이블에 추가한다.
+        4. (필요 시) 외부 계산 토큰용 새 블록을 할당한다.
+
+        인수:
+            request_id: 요청 ID.
+            new_computed_blocks: prefix cache hit로 새로 계산된 블록들.
+            num_local_computed_tokens: 로컬 계산 토큰 수.
+            num_external_computed_tokens: 외부 계산 토큰 수.
         """
 
         if request_id in self.num_cached_block:
-            # Fast-path: a running request won't have any new prefix-cache hits.
-            # It should not have any new computed blocks.
+            # 빠른 경로: 실행 중인 요청은 새 prefix cache hit가 없다.
+            # 따라서 new_computed_blocks는 비어 있어야 한다.
             assert len(new_computed_blocks) == 0
             return
 
-        # A new request.
+        # 새 요청.
         req_blocks = self.req_to_blocks[request_id]
         assert len(req_blocks) == 0
         num_total_computed_tokens = (
@@ -176,16 +173,15 @@ class SingleTypeKVCacheManager(ABC):
         num_skipped_tokens = self.get_num_skipped_tokens(num_total_computed_tokens)
         num_skipped_blocks = num_skipped_tokens // self.block_size
         if num_skipped_blocks > 0:
-            # It is possible that all new computed blocks are skipped when
-            # num_skipped_blocks > len(new_computed_blocks).
+            # num_skipped_blocks가 더 크면 new_computed_blocks 전체가 skip될 수 있다.
             new_computed_blocks = new_computed_blocks[num_skipped_blocks:]
-            # Some external computed tokens may be skipped too.
+            # 외부 계산 토큰도 일부 skip될 수 있다.
             num_external_computed_tokens = min(
                 num_total_computed_tokens - num_skipped_tokens,
                 num_external_computed_tokens,
             )
 
-        # Touch the computed blocks to make sure they won't be evicted.
+        # 계산 블록을 touch해 퇴출되지 않도록 한다.
         if self.enable_caching:
             self.block_pool.touch(new_computed_blocks)
         else:
@@ -193,17 +189,16 @@ class SingleTypeKVCacheManager(ABC):
                 "Computed blocks should be empty when prefix caching is disabled"
             )
 
-        # Skip blocks are padded with null blocks.
+        # skip 구간은 null block으로 채운다.
         req_blocks.extend([self._null_block] * num_skipped_blocks)
-        # Add the remaining computed blocks.
+        # 나머지 계산 블록을 추가한다.
         req_blocks.extend(new_computed_blocks)
-        # All cached hits (including skipped nulls) are already cached; mark
-        # them so cache_blocks() will not try to re-cache blocks that already
-        # have a block_hash set.
+        # 캐시 hit 블록(건너뛴 null 포함)은 이미 캐시에 있으므로,
+        # cache_blocks()가 다시 캐시하려고 하지 않도록 표시한다.
         self.num_cached_block[request_id] = len(req_blocks)
 
         if num_external_computed_tokens > 0:
-            # Allocate new blocks for external computed tokens.
+            # 외부 계산 토큰에 새 블록을 할당합니다.
             allocated_blocks = self.block_pool.get_new_blocks(
                 cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks)
             )
@@ -213,18 +208,17 @@ class SingleTypeKVCacheManager(ABC):
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
         """
-        Allocate new blocks for the request to give it at least `num_tokens`
-        token slots.
+        요청에 대해 새 블록을 할당해 최소 `num_tokens` 슬롯을 보장한다.
 
-        Args:
-            request_id: The request ID.
-            num_tokens: The total number of tokens that need a slot (including
-                tokens that are already allocated).
-            num_tokens_main_model: The number of tokens for the main model (aka target
-                model in spec decode). w/o spec decode, it is num_tokens;
-                with spec decode, it is num_tokens - num_lookahead_tokens.
-        Returns:
-            The new allocated blocks.
+        인수:
+            request_id: 요청 ID.
+            num_tokens: 슬롯이 필요한 총 토큰 수
+                (이미 할당된 토큰 포함).
+            num_tokens_main_model: 메인 모델 기준 토큰 수.
+                speculative decoding이 없으면 `num_tokens`와 같고,
+                있으면 `num_tokens - num_lookahead_tokens`이다.
+        반환:
+            새로 할당된 블록.
         """
         req_blocks = self.req_to_blocks[request_id]
         num_required_blocks = cdiv(num_tokens, self.block_size)
@@ -238,12 +232,12 @@ class SingleTypeKVCacheManager(ABC):
 
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
         """
-        Cache the blocks for the request.
+        요청에 대한 블록을 캐시합니다.
 
-        Args:
-            request: The request.
-            num_tokens: The total number of tokens that need to be cached
-                (including tokens that are already cached).
+        인수:
+            request: 요청.
+            num_tokens: 캐시 대상으로 볼 총 토큰 수
+                (이미 할당된 토큰 포함).
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
@@ -264,16 +258,15 @@ class SingleTypeKVCacheManager(ABC):
 
     def free(self, request_id: str) -> None:
         """
-        Free the blocks for the request.
+        요청에 대한 블록을 해제합니다.
 
-        Args:
-            request_id: The request ID.
+        인수:
+            request_id: 요청 ID.
         """
-        # Default to [] in case a request is freed (aborted) before alloc.
+        # 할당 전에 요청이 중단/해제될 수 있으므로 기본값은 []로 둔다.
         req_blocks = self.req_to_blocks.pop(request_id, [])
 
-        # Free blocks in reverse order so that the tail blocks are
-        # freed first.
+        # tail 블록이 먼저 해제되도록 역순으로 free한다.
         ordered_blocks = reversed(req_blocks)
 
         self.block_pool.free_blocks(ordered_blocks)
@@ -282,15 +275,13 @@ class SingleTypeKVCacheManager(ABC):
     @abstractmethod
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
-        Get the number of common prefix blocks for all requests with allocated
-        KV cache.
+        현재 할당된 요청들 사이의 공통 접두사 블록 수를 반환한다.
 
-        Args:
-            running_request_id: The request ID.
+        인수:
+            running_request_id: 요청 ID.
 
-        Returns:
-            The number of common prefix blocks for all requests with allocated
-            KV cache.
+        반환:
+            모든 활성 요청에서 공통으로 공유되는 접두사 블록 수.
         """
 
         raise NotImplementedError
@@ -310,36 +301,36 @@ class SingleTypeKVCacheManager(ABC):
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
-        Get the longest cache hit prefix of the blocks that is not longer than
-        `max_length`. The prefix should be a common prefix hit for all the
-        kv cache groups in `kv_cache_group_ids`. If no cache hit is found,
-        return an empty list.
-        If eagle is enabled, drop the last matched block to force recompute the
-        last block to get the required hidden states for eagle drafting head.
-        Need to be customized for each attention type.
+        `max_length` 이하 구간에서 최장 cache-hit 접두사를 찾는다.
 
-        Args:
-            block_hashes: The block hashes of the request.
-            max_length: The maximum length of the cache hit prefix.
-            kv_cache_group_ids: The ids of the kv cache groups.
-            block_pool: The block pool.
-            kv_cache_spec: The kv cache spec.
-            use_eagle: Whether to use eagle.
-            alignment_tokens: The returned cache hit length (in tokens) should
-                be a multiple of this value (in tokens). By default, it should
-                be set to the block_size.
-            dcp_world_size: The world size of decode context parallelism.
-            pcp_world_size: The world size of prefill context parallelism.
+        접두사는 `kv_cache_group_ids`의 모든 KV 캐시 그룹에서 공통이어야 한다.
+        cache hit가 없으면 빈 목록을 반환한다.
 
-        Returns:
-            A list of cached blocks with skipped blocks replaced by null block
-            for each kv cache group in `kv_cache_group_ids`.
-            Return a list of length `len(kv_cache_group_ids)`, where the i-th
-            element is a list of cached blocks for the i-th kv cache group
-            in `kv_cache_group_ids`.
-            For example, sliding window manager should return a list like
-            ([NULL, NULL, KVCacheBlock(7), KVCacheBlock(8)]) for block size 4
-            and sliding window 8 and len(kv_cache_group_ids) = 1.
+        Eagle이 활성화된 경우 마지막 매칭 블록을 제거해, 마지막 블록을
+        재계산하도록 강제한다. 이는 Eagle draft head에 필요한 hidden state를
+        얻기 위함이다.
+
+        attention 타입별 동작은 하위 클래스에서 구현한다.
+
+        인수:
+            block_hashes: 요청의 블록 해시 목록.
+            max_length: 캐시 히트 prefix의 최대 길이.
+            kv_cache_group_ids: KV cache group ID 목록.
+            block_pool: 블록 풀.
+            kv_cache_spec: KV cache 사양.
+            use_eagle: Eagle 사용 여부.
+            alignment_tokens: 반환되는 캐시 히트 길이(토큰 수)가
+                반드시 나누어떨어져야 하는 정렬 단위. 기본값은 block_size.
+            dcp_world_size: decode context parallel world size.
+            pcp_world_size: prefill context parallel world size.
+
+        반환:
+            `kv_cache_group_ids`의 각 그룹에 대한 캐시 블록 목록.
+            건너뛴 블록은 null_block으로 치환한다.
+            반환 튜플 길이는 `len(kv_cache_group_ids)`이며,
+            i번째 원소는 `kv_cache_group_ids`의 i번째 그룹에 대응한다.
+            예를 들어 block_size=4, sliding_window=8, 그룹 수 1이면
+            ([NULL, NULL, KVCacheBlock(7), KVCacheBlock(8)]) 같은 형태가 된다.
         """
 
         raise NotImplementedError
@@ -348,40 +339,37 @@ class SingleTypeKVCacheManager(ABC):
         self, request_id: str, total_computed_tokens: int
     ) -> None:
         """
-        Remove and free the blocks that are no longer needed for attention computation.
-        The removed blocks should be replaced by null_block.
+        attention 계산에 더 이상 필요하지 않은 블록을 제거하고,
+        제거된 위치를 null_block으로 대체한다.
 
-        This function depends on `get_num_skipped_tokens`, which need to be implemented
-        differently for each attention type.
+        이 함수는 attention 타입별로 다르게 구현되는
+        `get_num_skipped_tokens` 결과에 의존한다.
 
-        Args:
-            request_id: The request ID.
-            total_computed_tokens: The total number of computed tokens, including
-                local computed tokens and external computed tokens.
+        인수:
+            request_id: 요청 ID.
+            total_computed_tokens: 계산된 전체 토큰 수.
+                로컬 계산 토큰 및 외부 계산 토큰을 포함하는 계산된 토큰의 총 수.
         """
-        # Remove the blocks that will be skipped during attention computation.
+        # attention 계산 중 건너뛰어야 하는 블록을 제거한다.
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
         if num_skipped_tokens <= 0:
-            # This indicates that ALL tokens are inside attention window.
-            # Thus we do not need to free any blocks outside attention window.
-            # A typical case is full attention that we never free any token
-            # before the request is finished.
+            # 모든 토큰이 attention window 안에 있음을 의미한다.
+            # 따라서 window 밖 블록을 해제할 필요가 없다.
+            # 대표적으로 full attention은 요청 완료 전까지 skip이 없다.
             return
         blocks = self.req_to_blocks[request_id]
         num_skipped_blocks = num_skipped_tokens // self.block_size
-        # `num_skipped_tokens` may include tokens that haven't been allocated yet
-        # (e.g., when the attention window moves into the external computed tokens
-        # range), so we must cap to the number of blocks that currently exist for
-        # this request.
+        # `num_skipped_tokens`에는 아직 블록이 할당되지 않은 토큰이 섞일 수 있다
+        # (예: window가 외부 계산 토큰 영역까지 이동한 경우).
+        # 따라서 현재 요청에 실제로 존재하는 블록 수로 상한을 건다.
         num_skipped_blocks = min(num_skipped_blocks, len(blocks))
         removed_blocks: list[KVCacheBlock] = []
-        # Because the block starts from index 0, the num_skipped_block-th block
-        # corresponds to index num_skipped_blocks - 1.
+        # 블록 인덱스는 0부터 시작하므로, num_skipped_blocks개를 지우려면
+        # [num_skipped_blocks - 1 .. 0] 범위를 순회한다.
         for i in range(num_skipped_blocks - 1, -1, -1):
             if blocks[i] == self._null_block:
-                # If the block is already a null block, the blocks before it
-                # should also have been set to null blocks by the previous calls
-                # to this function.
+                # 이미 null block을 만났다면 그보다 앞쪽도 이전 호출에서
+                # null block으로 정리된 상태라고 본다.
                 break
             removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
@@ -389,19 +377,19 @@ class SingleTypeKVCacheManager(ABC):
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
-        Get the number of tokens that will be skipped for attention computation.
+        어텐션 계산을 위해 건너뛸 토큰 수를 가져옵니다.
 
-        Args:
-            num_computed_tokens: The number of tokens that have been computed.
+        인수:
+            num_computed_tokens: 계산된 토큰 수.
 
-        Returns:
-            The number of tokens that will be skipped for attention computation.
+        반환:
+            어텐션 계산을 위해 건너뛸 토큰 수.
         """
-        # The default behavior is to not skip any tokens.
+        # 기본 동작은 어떤 토큰도 건너뛰지 않는 것입니다.
         return 0
 
     def new_step_starts(self) -> None:
-        # do nothing by default
+        # 기본적으로 아무것도 하지 않습니다.
         return None
 
 
@@ -433,9 +421,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             block_size *= dcp_world_size * pcp_world_size
         max_num_blocks = max_length // block_size
         for block_hash in itertools.islice(block_hashes, max_num_blocks):
-            # block_hashes is a chain of block hashes. If a block hash is not
-            # in the cached_block_hash_to_id, the following block hashes are
-            # not computed yet for sure.
+            # block_hashes는 체인 구조다. 현재 블록이 캐시에 없으면
+            # 뒤 블록들도 확정 계산 상태라고 보장할 수 없다.
             if cached_block := block_pool.get_cached_block(
                 block_hash, kv_cache_group_ids
             ):
@@ -444,11 +431,11 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             else:
                 break
         if use_eagle and computed_blocks[0]:
-            # Need to drop the last matched block if eagle is enabled.
+            # Eagle이 활성화된 경우 마지막으로 일치하는 블록을 삭제해야 합니다.
             for computed in computed_blocks:
                 computed.pop()
         while (
-            block_size != alignment_tokens  # Faster for common case.
+            block_size != alignment_tokens  # 일반적인 경우 더 빠릅니다.
             and len(computed_blocks[0]) * block_size % alignment_tokens != 0
         ):
             for computed in computed_blocks:
@@ -490,23 +477,22 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
         assert pcp_world_size == 1, "PCP not support sliding window attn now."
 
-        # The number of contiguous blocks needed for prefix cache hit.
-        # -1 since the input token itself is also included in the window
+        # 접두사 캐시 히트에 필요한 연속 블록 수입니다.
+        # -1 입력 토큰 자체도 창에 포함되어 있으므로 
         sliding_window_contiguous_blocks = cdiv(
             kv_cache_spec.sliding_window - 1, kv_cache_spec.block_size
         )
         if use_eagle:
-            # Need to drop the last matched block if eagle is enabled. For
-            # sliding window layer, we achieve this by increasing the number of
-            # contiguous blocks needed for prefix cache hit by one and dropping
-            # the last matched block.
+            # Eagle이 활성화된 경우 마지막으로 일치하는 블록을 삭제해야 합니다. 
+            # 슬라이딩 윈도우 레이어의 경우 접두사 캐시 히트에 필요한 
+            # 연속 블록 수를 1만큼 늘리고 마지막으로 일치하는 블록
+            # 을 삭제해 이를 달성한다.
             sliding_window_contiguous_blocks += 1
 
-        # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
-        # optimize the time complexity from O(max_num_blocks) to
+        # TODO: miss 시 i를 sliding_window_contiguous_blocks 단위로 건너뛰어
+        # 시간 복잡도를 O(max_num_blocks)에서
         # O(max_num_blocks / sliding_window_contiguous_blocks +
-        # sliding_window_contiguous_blocks),
-        # which is good for low cache hit rate scenarios.
+        # sliding_window_contiguous_blocks)로 낮출 수 있다.
         max_num_blocks = max_length // kv_cache_spec.block_size
         computed_blocks = tuple(
             [block_pool.null_block] * max_num_blocks
@@ -515,27 +501,27 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         block_size = kv_cache_spec.block_size
         num_contiguous_blocks = 0
         match_found = False
-        # Search from right to left and early stop when a match is found.
+        # 오른쪽에서 왼쪽으로 검색하고 일치 항목이 발견되면 조기 중지합니다.
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(
                 block_hashes[i], kv_cache_group_ids
             ):
-                # Skip prefix matching check if the block is not aligned with
-                # `alignment_tokens`.
+                # 첫 일치 후보가 alignment_tokens 경계와 맞지 않으면
+                # prefix match 검사 자체를 건너뛴다.
                 if (
                     num_contiguous_blocks == 0
-                    and block_size != alignment_tokens  # Faster for common case.
+                    and block_size != alignment_tokens  # 일반적인 경우 더 빠릅니다.
                     and (i + 1) * block_size % alignment_tokens != 0
                 ):
                     continue
-                # Add the cached block to the computed blocks.
+                # 계산된 블록에 캐시된 블록을 추가합니다.
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed[i] = cached
                 num_contiguous_blocks += 1
                 if num_contiguous_blocks >= sliding_window_contiguous_blocks:
-                    # Trim the trailing blocks.
-                    # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
-                    # when sliding_window_contiguous_blocks=2.
+                    # 후행 블록을 다듬습니다.
+                    # 예: [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
+                    # Sliding_window_contiguous_blocks=2 예시.
                     for computed in computed_blocks:
                         del computed[i + num_contiguous_blocks :]
                     match_found = True
@@ -543,12 +529,12 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             else:
                 num_contiguous_blocks = 0
         if not match_found:
-            # The first `num_contiguous_blocks` is a cache hit even if
-            # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
+            # 조건을 만족하는 연속 구간을 못 찾은 경우,
+            # 현재까지 이어진 앞부분만 남긴다.
             for computed in computed_blocks:
                 del computed[num_contiguous_blocks:]
             while (
-                block_size != alignment_tokens  # Faster for common case.
+                block_size != alignment_tokens  # 일반적인 경우 더 빠릅니다.
                 and len(computed_blocks[0]) * block_size % alignment_tokens != 0
             ):
                 for computed in computed_blocks:
@@ -563,38 +549,37 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
-        Get the number of tokens that will be skipped for attention computation.
+        어텐션 계산을 위해 건너뛸 토큰 수를 가져옵니다.
 
-        For sliding window, this corresponds to the tokens that are prior to
-        the current sliding window.
+        슬라이딩 윈도우 attention의 경우,
+        현재 윈도우보다 앞쪽에 있어 계산에서 제외할 토큰 수를 의미한다.
 
-        Example:
-        sliding_window=4, num_computed_tokens=7
+        예:
+        예시: sliding_window=4, num_computed_tokens=7
 
-        Tokens:   [ 0  1  2  3  4  5  6  7 ]
-                  | ---- computed -----|
-                                         ^ next token to be computed
-                               |-----------| sliding window for next token
-                  |--skipped---|
+        토큰: [ 0 1 2 3 4 5 6 7 ]
+                  | ---- 계산됨 -----|
+                                         ^ 계산할 다음 토큰
+                               |------------| 다음 토큰을 위한 슬라이딩 창
+                  |--건너뜀---|
 
-        The current window contains tokens 4~7. Tokens 0~3 will be skipped for
-        attention computation since they are outside the sliding window.
-        Thus, get_num_skipped_tokens(7) == 4.
+        현재 윈도우에는 토큰 4~7이 포함된다.
+        토큰 0~3은 윈도우 밖이므로 attention 계산에서 건너뛴다.
+        따라서 get_num_skipped_tokens(7) == 4.
 
-        Args:
-            num_computed_tokens: The number of tokens that have been computed.
+        인수:
+            num_computed_tokens: 계산된 토큰 수.
 
-        Returns:
-            The number of tokens that will be skipped for attention computation.
+        반환:
+            어텐션 계산을 위해 건너뛸 토큰 수.
         """
         return max(0, num_computed_tokens - self.sliding_window + 1)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
-        NOTE(Chen): The prefix blocks are null blocks for sliding window layers.
-        So it's not correct to count ref_cnt like FullAttentionManager. Return
-        0 here for correctness. Need to support cascade attention + sliding
-        window in the future.
+        NOTE(Chen): Sliding window 레이어의 prefix 영역은 null block이므로
+        FullAttentionManager처럼 ref_cnt 기반 공통 접두사 계산이 유효하지 않다.
+        정확성을 위해 항상 0을 반환한다.
         """
         return 0
 
@@ -618,39 +603,39 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
-        For chunked local attention, we need to find the longest cache hit
-        prefix of the blocks that is not longer than `max_length`. The prefix
-        should be a common prefix hit for all the kv cache groups in
-        `kv_cache_group_ids`. If no cache hit is found, return an empty list.
-        note we mark as computed if the whole block is outside of the local
-        window, and set the block as null. Examples:
+        chunked local attention에서 `max_length` 이내의 최장 cache-hit 접두사를 찾는다.
 
-        1. Attention chunk size of 8, block size of 4, max length of 15
-        for next token at 15th (zero-indexed), 8th - 14th tokens are in
-        the window(needs lookup), 0th - 7th are not in the window,
-        so they are already marked as computed. We check the complete
-        block3 (8th - 11th tokens), Assume block 3 is hit, we will return
-        [null, null, block 3], otherwise, we return [null, null]
+        반환되는 접두사는 `kv_cache_group_ids`의 모든 KV 캐시 그룹에서 공통이어야 한다.
+        cache hit가 없으면 빈 리스트를 반환한다.
 
-        2. Attention chunk size of 8, block size of 4, max length of 16
-        for next token at 16th (zero-indexed), 0th - 15th tokens are not
-        in the window, so they are already marked as computed.
-        we return 4 blocks[null, null, null, null]
+        로컬 attention window 바깥의 완전 블록은 이미 계산된 것으로 간주해
+        null block으로 채운다.
 
-        Args:
-            block_hashes: The block hashes of the request.
-            max_length: The maximum length of the cache hit prefix.
-            kv_cache_group_ids: The ids of the kv cache groups.
-            block_pool: The block pool.
-            kv_cache_spec: The kv cache spec.
-            use_eagle: Whether to use eagle.
-            dcp_world_size: The world size of decode context parallelism.
-            pcp_world_size: The world size of prefill context parallelism.
-            alignment_tokens: The returned cache hit length (in tokens) should
-                be a multiple of this value (in tokens).
+        예 1:
+        - chunk_size=8, block_size=4, max_length=15
+        - 다음 토큰은 인덱스 15(0-indexed)라고 할 때,
+          8~14는 window 안(조회 필요), 0~7은 window 밖(이미 계산됨)이다.
+        - 완전 블록인 block3(8~11)만 조회하며 hit라면
+          `[null, null, block3]`, miss라면 `[null, null]`을 반환한다.
 
-        Returns:
-            A list of cached blocks
+        예 2:
+        - chunk_size=8, block_size=4, max_length=16
+        - 0~15 전체가 window 밖이므로 이미 계산된 것으로 처리한다.
+        - `[null, null, null, null]`을 반환한다.
+
+        인수:
+            block_hashes: 요청의 블록 해시 체인.
+            max_length: 캐시 적중 접두사의 최대 길이.
+            kv_cache_group_ids: KV 캐시 그룹 ID 목록.
+            block_pool: 블록 풀.
+            kv_cache_spec: KV 캐시 사양.
+            use_eagle: Eagle 사용 여부.
+            dcp_world_size: 디코드 컨텍스트 병렬 처리의 세계 크기.
+            pcp_world_size: 사전 채우기 컨텍스트 병렬 처리의 세계 크기.
+            alignment_tokens: 반환되는 cache-hit 길이(토큰)가 맞춰야 하는 정렬 단위.
+
+        반환:
+            캐시된 블록 목록.
         """
         assert isinstance(kv_cache_spec, ChunkedLocalAttentionSpec), (
             "ChunkedLocalAttentionManager can only be used for "
@@ -674,10 +659,9 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             )
         else:
             local_attention_start_idx = 0
-        # we marked blocks out of window as computed
-        # with null blocks, and blocks inside window based on cache lookup
-        # result [null] [null] ... [null] [hit block 1 (1st block contain
-        # last window)] [hit block 2] ... [hit block x]
+        # window 바깥 블록은 null block(이미 계산됨)로 채우고,
+        # window 안 블록은 cache lookup 결과를 순서대로 붙인다.
+        # 결과 형태: [null] ... [null] [hit block 1] [hit block 2] ...
         local_attention_start_block_idx = (
             local_attention_start_idx // kv_cache_spec.block_size
         )
@@ -698,44 +682,44 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
-        Get the number of tokens that will be skipped for attention computation.
+        어텐션 계산을 위해 건너뛸 토큰 수를 가져옵니다.
 
-        For chunked local attention, this corresponds to the tokens that are on
-        the left side of the current chunk.
+        청크된 로컬 주의의 경우 이는 현재 청크의 왼쪽에
+        있는 토큰에 해당합니다.
 
-        Example 1:
-        chunk size = 8, num_computed_tokens = 13
-        Tokens:  [ 0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 ] ...
-                 | ----- computed ---------------|
-                                                  ^^ next token to be computed
-                                   |----------------| <-- attention window for
-                                                          next token
-                 |--- skipped -----|
-        Output: get_num_skipped_tokens(13) == 8
+        예 1:
+        청크 크기 = 8, num_computed_tokens = 13
+        토큰: [ 0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 ] ...
+                 | ----- 계산됨 ---------------|
+                                                  ^^ 다음 계산할 토큰
+                                   |----------------| <-- 
+                                                          다음 토큰에 대한 주의 창
+                 |--- 건너뜀 -----|
+        출력: get_num_skipped_tokens(13) == 8
 
-        Example 2:
-        chunk size = 8, num_computed_tokens = 8
-        Tokens:  [ 0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 ] ...
-                 | --- computed ---|
-                                     ^ next token to be computed
-                                   |--| <-- attention window for next token
-                 | --- skipped ----|
-        Output: get_num_skipped_tokens(8) == 8
+        예 2:
+        청크 크기 = 8, num_computed_tokens = 8
+        토큰: [ 0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 ] ...
+                 | --- 계산됨 ---|
+                                     ^ 계산할 다음 토큰
+                                   |--| <-- 다음 토큰에 대한 주의 창
+                 | --- 건너뜀 ----|
+        출력: get_num_skipped_tokens(8) == 8
 
-        Example 3:
-        chunk size = 8, num_computed_tokens = 7
-        Tokens:  [ 0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 ] ...
-                 |---computed---|
-                                 ^ next token to be computed
-                 |-----------------| <-- attention window for next token
-                 no token should be skipped.
-        Output: get_num_skipped_tokens(7) == 0
+        예 3:
+        청크 크기 = 8, num_computed_tokens = 7
+        토큰: [ 0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 ] ...
+                 |---계산됨---|
+                                 ^ 계산할 다음 토큰
+                 |----| <-- 다음 토큰에 대한 주의 창
+                 토큰을 건너뛰어야 합니다.
+        출력: get_num_skipped_tokens(7) == 0
 
-        Args:
-            num_computed_tokens: The number of tokens that have been computed.
+        인수:
+            num_computed_tokens: 계산된 토큰 수.
 
-        Returns:
-            The number of tokens that will be skipped for attention computation.
+        반환:
+            어텐션 계산을 위해 건너뛸 토큰 수.
         """
         num_skipped_tokens = (
             num_computed_tokens // self.attention_chunk_size
@@ -744,7 +728,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
-        cascade attention is not supported by chunked local attention.
+        계단식 주의는 청크된 로컬 주의에서 지원되지 않습니다.
         """
         return 0
 
@@ -758,10 +742,9 @@ class MambaManager(SingleTypeKVCacheManager):
         self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
         if self.mamba_cache_mode == "align":
-            # Mapping from request ID to the index of the block
-            # allocated in the previous step
+            # 요청 ID -> 이전 단계에서 할당된 상태 블록 인덱스
             self.last_state_block_idx: dict[str, int] = {}
-            # The set of the requests that have been allocated blocks
+            # 할당된 요청 집합 블록
             self._allocated_block_reqs: set[str] = set()
 
     @classmethod
@@ -788,50 +771,47 @@ class MambaManager(SingleTypeKVCacheManager):
 
         block_size = kv_cache_spec.block_size
         max_num_blocks = max_length // block_size
-        # Search from right to left and early stop when a match is found.
+        # 오른쪽에서 왼쪽으로 검색하고 일치 항목이 발견되면 조기 중지합니다.
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(
                 block_hashes[i], kv_cache_group_ids
             ):
-                # When enable Mamba prefix caching, `block_size` will be aligned
-                # across full attention layers and Mamba layers to ensure the
-                # prefix hit length aligned at block
+                # Mamba prefix caching 사용 시, full attention과 Mamba 레이어 사이에서
+                # `block_size` 정렬을 만족해야 prefix hit 길이 계산이 올바르다.
                 if (
-                    block_size != alignment_tokens  # Faster for common case.
+                    block_size != alignment_tokens  # 일반적인 경우 더 빠릅니다.
                     and (i + 1) * block_size % alignment_tokens != 0
                 ):
                     continue
                 for computed, cached in zip(computed_blocks, cached_block):
-                    # the hit length logic later assumes:
-                    #  hit_length = len(hit_blocks_other_attn[0])
-                    #               * self.other_block_size
-                    # so we insert dummy blocks at the beginning:
+                    # hit length 정렬을 보장한다.
+                    # 이후 로직은
+                    # hit_length = len(hit_blocks_other_attn[0]) * self.other_block_size
+                    # 를 가정하므로, 앞부분에 더미 블록을 삽입한다.
                     computed.extend([block_pool.null_block] * i)
                     computed.append(cached)
-                break  # we just need the last match - early stopping
+                break  # 마지막 일치만 필요합니다 - 조기 중지
 
         return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
 
-        # NOTE (tdoublep) with async scheduling, the num_computed_tokens can contain
-        # draft tokens from the previous step that may or may not be rejected later.
-        # This can make us think we are further ahead in the sequence than we actually
-        # are, so let's assume that all tokens are rejected so we don't free blocks
-        # that we might actually need.
+        # NOTE(tdoublep): 비동기 스케줄링에서는 num_computed_tokens에
+        # 이후 거부될 수도 있는 이전 스텝 draft 토큰이 포함될 수 있다.
+        # 시퀀스 진행도를 과대평가해 필요한 블록을 너무 일찍 해제하지 않도록
+        # speculative 블록 수만큼 보수적으로 차감한다.
         num_computed_tokens = max(0, num_computed_tokens - self.num_speculative_blocks)
 
         super().remove_skipped_blocks(request_id, num_computed_tokens)
         if self.mamba_cache_mode == "align":
-            # `last_state_block_idx` refers to the block index allocated two steps ago.
-            # The block allocated in the previous step is used to copy Mamba states
-            # into the block allocated in the current step; the earlier block is
-            # no longer needed and should be freed here.
+            # `last_state_block_idx`는 두 단계 전에 할당된 블록 인덱스를 나타냅니다.
+            # 이전 단계에서 할당된 블록은 Mamba 상태를 복사하는 데 사용됩니다.
+            # 현재 단계에서 새로 할당된 블록으로 상태를 옮긴 뒤,
+            # 이전 상태 블록은 더 이상 필요하지 않으므로 해제한다.
             last_state_block_idx = self.last_state_block_idx.get(request_id)
-            # Blocks allocated during prefill may be non-contiguous. Use
-            # `last_state_block_idx` to free the appropriate block and replace it
-            # with a null block.
+            # prefill 중에는 블록이 비연속일 수 있어 인덱스로 정확히 찾아
+            # 해당 블록만 해제하고 null block으로 치환한다.
             if (
                 last_state_block_idx is not None
                 and last_state_block_idx
@@ -844,7 +824,7 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
-        cascade attention is not supported by mamba
+        Cascade attention은 Mamba에서 지원하지 않는다.
         """
         return 0
 
@@ -861,14 +841,12 @@ class MambaManager(SingleTypeKVCacheManager):
             len(new_computed_blocks) > 0
             and new_computed_blocks[-1].block_hash in self.cached_blocks_this_step
         ):
-            # Mamba can't rely on blocks generated by other requests in the current step
-            # To put it in the next step, we return num_gpu_blocks + 1 so
-            # that kv_cache_manager will think there is no enough blocks to allocte now
-            # and don't schedule it in the current step.
+            # Mamba는 같은 스텝에서 다른 요청이 만든 블록에 의존하면 안 된다.
+            # 이번 스텝 스케줄을 막기 위해 의도적으로 과대한 값을 반환한다.
             return self.block_pool.num_gpu_blocks + 1
         if self.mamba_cache_mode != "align":
-            # Allocate extra `num_speculative_blocks` blocks for
-            # speculative decoding (MTP/EAGLE) with linear attention.
+            # 선형 attention + speculative decoding(MTP/EAGLE)용으로
+            # `num_speculative_blocks`를 추가 할당한다.
             if self.num_speculative_blocks > 0:
                 num_tokens += (
                     self.kv_cache_spec.block_size * self.num_speculative_blocks
@@ -881,15 +859,14 @@ class MambaManager(SingleTypeKVCacheManager):
                 num_tokens_main_model,
             )
         else:
-            # We don't allocate blocks for lookahead tokens in align mode, because if
-            # x * block_size tokens are scheduled, num_tokens is
-            # x * block_size + num_lookahead_tokens and breaks the alignment.
-            # We can ignore lookahead tokens because current draft models don't have
-            # mamba layers.
+            # align 모드에서는 speculative 토큰용 블록을 별도 할당하지 않는다.
+            # x * block_size 토큰이 배정되면 num_tokens는
+            # x * block_size + num_lookahead_tokens 형태가 되어 정렬이 깨질 수 있다.
+            # 현재 draft 모델에는 Mamba 레이어가 없으므로 speculative 토큰은 무시한다.
             num_tokens = num_tokens_main_model
 
-            # NOTE(tdouble): this is an over-estimate of how many blocks we need because
-            # num_tokens can include draft tokens that will later be rejected.
+            # NOTE(tdouble): 나중에 거부될 draft 토큰이 섞일 수 있어
+            # 필요한 블록 수를 보수적으로(과대) 추정한다.
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )
@@ -900,12 +877,11 @@ class MambaManager(SingleTypeKVCacheManager):
             )
             if num_new_blocks > 0:
                 if request_id in self._allocated_block_reqs:
-                    # Old request. Needs at most 1 more blocks as we can reuse the
-                    # speculative blocks in previous step.
+                    # 기존 요청은 이전 스텝 speculative 블록을 재사용할 수 있어
+                    # 최대 1개만 추가로 필요하다.
                     num_new_blocks = 1
                 else:
-                    # First prefill. Allocate 1 block for running state and the
-                    # speculative blocks.
+                    # 첫 prefill은 실행 상태 블록 1개 + speculative 블록을 잡는다.
                     num_new_blocks = 1 + self.num_speculative_blocks
 
             num_evictable_computed_blocks = self._get_num_evictable_blocks(
@@ -918,23 +894,22 @@ class MambaManager(SingleTypeKVCacheManager):
     ) -> list[KVCacheBlock]:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.mamba_cache_mode != "align":
-            # Allocate extra `num_speculative_blocks` blocks for
-            # speculative decoding (MTP/EAGLE) with linear attention.
+            # 선형 attention + speculative decoding(MTP/EAGLE)용으로
+            # `num_speculative_blocks`를 추가 할당한다.
             if self.num_speculative_blocks > 0:
                 num_tokens += self.block_size * self.num_speculative_blocks
             return super().allocate_new_blocks(
                 request_id, num_tokens, num_tokens_main_model
             )
         else:
-            # We don't allocate blocks for lookahead tokens in align mode, because if
-            # x * block_size tokens are scheduled, num_tokens is
-            # x * block_size + num_lookahead_tokens and breaks the alignment.
-            # We can ignore lookahead tokens because current draft models don't have
-            # mamba layers.
+            # align 모드에서는 speculative 토큰용 블록을 별도 할당하지 않는다.
+            # x * block_size 토큰이 배정되면 num_tokens는
+            # x * block_size + num_lookahead_tokens 형태가 되어 정렬이 깨질 수 있다.
+            # 현재 draft 모델에는 Mamba 레이어가 없으므로 speculative 토큰은 무시한다.
             num_tokens = num_tokens_main_model
             req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
-            # NOTE(tdouble): this is an over-estimate of how many blocks we need because
-            # num_tokens can include draft tokens that will later be rejected.
+            # NOTE(tdouble): 나중에 거부될 draft 토큰이 섞일 수 있어
+            # 필요한 블록 수를 보수적으로(과대) 추정한다.
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )
@@ -947,22 +922,22 @@ class MambaManager(SingleTypeKVCacheManager):
                 )
                 prev_block_len = len(req_blocks)
                 blocks_allocated = request_id in self._allocated_block_reqs
-                # Record the last state block
+                # 마지막 상태 블록을 기록합니다.
                 if blocks_allocated:
-                    # We always save the running state at the last
-                    # (1 + num_speculative_blocks) block
+                    # 항상 마지막 (1 + num_speculative_blocks) 블록을 기준으로
+                    # 상태 블록 인덱스를 기록한다.
                     self.last_state_block_idx[request_id] = (
                         prev_block_len - 1 - self.num_speculative_blocks
                     )
                 elif prev_block_len > 0:
-                    # When a new request hits the prefix cache, the last block
-                    # saves the hit state.
+                    # 새 요청이 prefix cache hit로 시작한 경우,
+                    # 마지막 기존 블록에 상태가 있다.
                     self.last_state_block_idx[request_id] = prev_block_len - 1
 
                 num_skipped_blocks = (
                     num_required_blocks - self.num_speculative_blocks - 1
                 )
-                # null blocks
+                # null 블록
                 if prev_block_len < num_skipped_blocks:
                     req_blocks.extend(
                         [
@@ -972,7 +947,7 @@ class MambaManager(SingleTypeKVCacheManager):
                     )
 
                 if blocks_allocated:
-                    # reuse previous speculative blocks in this step
+                    # 이 단계에서 이전 추측 블록을 재사용합니다.
                     for block_idx in range(
                         prev_block_len - self.num_speculative_blocks, prev_block_len
                     ):
@@ -999,9 +974,9 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
-        Get the number of tokens whose mamba state are not needed anymore. Mamba only
-        need to keep the state of the last computed token, so we return
-        num_computed_tokens - 1.
+        Mamba 상태 계산에서 더 이상 필요 없는 토큰 수를 반환한다.
+        Mamba는 마지막 계산 토큰의 상태만 유지하면 되므로
+        `num_computed_tokens - 1`을 반환한다.
         """
         return num_computed_tokens - 1
 
@@ -1023,7 +998,7 @@ class MambaManager(SingleTypeKVCacheManager):
 
 
 class CrossAttentionManager(SingleTypeKVCacheManager):
-    """Manager for cross-attention KV cache in encoder-decoder models."""
+    """인코더-디코더 모델의 교차 주의 KV 캐시에 대한 관리자를 반환합니다."""
 
     def allocate_new_computed_blocks(
         self,
@@ -1032,18 +1007,18 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
     ) -> None:
-        # We do not cache blocks for cross-attention to be shared between
-        # requests, so  `new_computed_blocks` should always be empty.
+        # cross attention은 요청 간 공유 캐싱을 하지 않으므로
+        # `new_computed_blocks`는 항상 비어 있어야 한다.
         assert len(new_computed_blocks) == 0
 
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
-        # We do not cache blocks for cross-attention to be shared between
-        # requests, so this method is not relevant.
+        # cross-attention은 요청별 캐시만 사용하므로
+        # prefix cache 경로인 이 메서드는 호출되면 안 된다.
         raise ValueError("Should not be called as prefix caching is disabled.")
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        # Cross-attention blocks contain request-specific encoder states
-        # and are not shared between different requests
+        # Cross-attention 블록은 요청별 인코더 상태
+        # 를 포함하며 다른 요청 간에 공유되지 않는다.
         return 0
 
     @classmethod
@@ -1062,12 +1037,12 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         assert isinstance(kv_cache_spec, CrossAttentionSpec), (
             "CrossAttentionManager can only be used for cross-attention groups"
         )
-        # Cross-attention does not benefit from prefix caching since:
-        # 1. Encoder states are unique per request (different audio/image
-        #    inputs)
-        # 2. Encoder states are computed once per request, not incrementally
-        # 3. No reusable prefix exists between different multimodal inputs
-        # Return empty blocks to indicate no cache hits
+        # Cross-attention은 다음과 같은 이유로 접두사 캐싱의 이점을 얻지 못합니다. 
+        # 1. 인코더 상태는 요청마다 고유합니다(다른 오디오/이미지
+        # 입력)
+        # 점진적으로
+        # 3. 서로 다른 멀티모달 입력 사이에 재사용 가능한 접두사가 존재하지 않습니다.
+        # 캐시 히트가 없음을 나타내기 위해 빈 블록을 반환합니다.
         raise NotImplementedError("CrossAttentionManager does not support caching")
 
 
