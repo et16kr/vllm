@@ -1,20 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-NOTE: Coding style guide for this file:
-This model runner is shared by all models: text and multimodal, generative
-and embedding, public and private. As a result, this file must only contain
-code that is common to every model. Model-specific behavior belongs in the
-appropriate model-specific files.
+참고: 이 파일의 코딩 스타일 가이드:
+이 모델 러너는 텍스트/멀티모달, 생성/임베딩, 공개/비공개를 포함한
+모든 모델이 함께 사용합니다. 따라서 이 파일에는 모든 모델에 공통인
+코드만 포함되어야 합니다. 모델별 동작은 해당 모델 전용 파일에
+배치해야 합니다.
 
-In other words:
-* Be paranoid about changing this file. It should remain stable.
-* Be even more paranoid about adding new lines. It should remain minimal.
+즉:
+* 이 파일을 변경할 때는 매우 신중해야 합니다. 안정적으로 유지되어야 합니다.
+* 새 줄을 추가할 때는 그보다 더 신중해야 합니다. 최소한으로 유지되어야 합니다.
 
-Even for shared features (for example, different parallelism modes), keep the
-complexity out of this path. The less common the feature, the more it should be
-hidden. Prefer utility functions defined elsewhere and call them from here,
-instead of embedding feature-specific logic directly.
+공통 기능(예: 다양한 병렬화 모드)이라도 이 경로에 복잡도를 넣지 마세요.
+기능이 덜 일반적일수록 더 숨겨져야 합니다. 기능별 로직을 여기에 직접
+삽입하기보다, 다른 곳에 정의된 유틸리티 함수를 호출하는 방식을 우선하세요.
 """
 
 import functools
@@ -118,7 +117,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.dtype = self.model_config.dtype
         self.kv_cache_dtype = self.dtype
         if self.cache_config.cache_dtype != "auto":
-            # Quantized KV cache.
+            # 양자화된 KV 캐시.
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype
             ]
@@ -132,7 +131,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.output_copy_stream = torch.cuda.Stream(self.device)
         self.output_copy_event = torch.cuda.Event()
 
-        # Pipeline parallelism.
+        # 파이프라인 병렬화.
         self.pp_size = self.parallel_config.pipeline_parallel_size
         self.use_pp = self.pp_size > 1
         if self.use_pp:
@@ -142,13 +141,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.is_first_pp_rank = True
             self.is_last_pp_rank = True
 
-        # Decode context parallelism.
+        # 디코드 컨텍스트 병렬화.
         self.dcp_size = self.parallel_config.decode_context_parallel_size
         self.use_dcp = self.dcp_size > 1
         self.dcp_rank = get_dcp_group().rank_in_group if self.use_dcp else 0
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
 
-        # Multimodal
+        # 멀티모달
         self.mm_registry = MULTIMODAL_REGISTRY
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             self.model_config
@@ -166,12 +165,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator = init_speculator(self.vllm_config, self.device)
 
             if self.speculative_config.method == "eagle3":
-                # EAGLE3 may require auxiliary hidden states from target model outputs.
+                # EAGLE3는 타깃 모델 출력의 보조 hidden state가 필요할 수 있음.
                 self.use_aux_hidden_state_outputs = True
                 if self.pp_size > 1:
                     raise ValueError("EAGLE3 with pipeline parallel is not supported.")
 
-        # Draft tokens propagation - for spec-dec + struct outputs.
+        # 초안 토큰 전파 - spec-dec + 구조화 출력용.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
         self.req_states = RequestState(
@@ -197,28 +196,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
 
-        # CUDA graphs.
+        # CUDA 그래프.
         self.cudagraph_manager = CudaGraphManager(
             self.vllm_config,
             self.use_aux_hidden_state_outputs,
             self.device,
         )
-        # Structured outputs worker.
+        # 구조화 출력 워커.
         self.structured_outputs_worker = StructuredOutputsWorker(
             max_num_logits=self.max_num_reqs * (self.num_speculative_steps + 1),
             vocab_size=self.vocab_size,
             device=self.device,
         )
-        # LoRA-related workers.
+        # LoRA 관련 워커.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
-        # KV Connector if configured.
+        # 설정된 경우 KV 커넥터.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
 
-        # Pooling models.
+        # 풀링 모델.
         self.is_pooling_model = self.model_config.runner_type == "pooling"
         self.pooling_runner: PoolingRunner | None = None
 
-        # For transferring state from execute_model to subsequent sample_tokens call.
+        # execute_model에서 이후 sample_tokens 호출로 상태를 전달하기 위한 용도.
         self.execute_model_state: tuple | None = None
 
     def update_max_model_len(self, max_model_len: int) -> None:
@@ -266,7 +265,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.speculator is not None:
             prepare_communication_buffer_for_model(self.speculator)
 
-        # Initialize the components that require the model.
+        # 모델이 필요한 컴포넌트 초기화.
         self.model_state = init_model_state(
             self.vllm_config, self.model, self.encoder_cache, self.device
         )
@@ -278,7 +277,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @functools.cached_property
     def main_stream(self) -> torch.cuda.Stream:
-        # Cache the default CUDA stream to avoid lookup overhead.
+        # 조회 오버헤드를 피하기 위해 기본 CUDA 스트림을 캐시.
         return torch.cuda.current_stream(self.device)
 
     def get_kv_cache_spec(self):
@@ -329,7 +328,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_run(
         self, num_tokens: int, *args, skip_attn: bool = True, **kwargs
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        # Create a dummy scheduler output.
+        # 더미 스케줄러 출력 생성.
         num_reqs = min(num_tokens, self.max_num_reqs)
         num_tokens_per_request = [num_tokens // num_reqs] * num_reqs
         num_tokens_per_request[-1] += num_tokens % num_reqs
@@ -341,10 +340,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dummy_scheduler_output.total_num_scheduled_tokens = num_tokens
         dummy_scheduler_output.num_scheduled_tokens = num_scheduled_tokens
 
-        # Disable any use of KVConnector for dummy runs.
+        # 더미 실행에서는 KVConnector 사용을 비활성화.
         self.kv_connector.set_disabled(True)
 
-        # For non-first PP ranks, create dummy intermediate_tensors.
+        # 첫 번째가 아닌 PP rank를 위해 더미 intermediate_tensors 생성.
         intermediate_tensors = None
         if not self.is_first_pp_rank:
             intermediate_tensors = self.model.make_empty_intermediate_tensors(
@@ -353,7 +352,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
             )
 
-        # Execute the model.
+        # 모델 실행.
         self.execute_model(
             dummy_scheduler_output,
             intermediate_tensors=intermediate_tensors,
@@ -362,7 +361,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.kv_connector.set_disabled(False)
 
-        # Non-last PP ranks don't produce output for sampling.
+        # 마지막이 아닌 PP rank는 샘플링용 출력을 생성하지 않음.
         if not self.is_last_pp_rank:
             return None, None
 
@@ -384,9 +383,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         expanded_local_pos = torch.zeros(
             num_reqs, dtype=torch.int32, device=self.device
         )
-        # NOTE(woosuk): During the initial memory profiling, the sampler may skip
-        # top_k, top_p, and logprobs, using less GPU memory than what is possible
-        # during actual execution.
+        # NOTE(woosuk): 초기 메모리 프로파일링 중에는 sampler가 top_k, top_p,
+        # logprobs를 생략할 수 있어 실제 실행 가능 시점보다 GPU 메모리를 더 적게
+        # 사용할 수 있음.
         self.sampler(
             logits,
             idx_mapping,
@@ -408,7 +407,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.max_num_tokens, skip_attn=True
         )
 
-        # Only run sampler/pooler on last PP rank (non-last ranks return None).
+        # 마지막 PP rank에서만 sampler/pooler 실행 (그 외 rank는 None 반환).
         if self.is_last_pp_rank:
             assert sample_hidden_states is not None
             if self.pooling_runner is None:
@@ -440,7 +439,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache.reset_encoder_cache()
 
     def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
-        # SP is not supported yet.
+        # SP는 아직 지원되지 않음.
         return num_scheduled_tokens
 
     @torch.inference_mode()
@@ -452,7 +451,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             return 0
 
-        # TODO (zhanqiu): support CUDA graph for PP.
+        # TODO (zhanqiu): PP에 대한 CUDA 그래프 지원.
         if self.use_pp:
             logger.warning_once(
                 "Skipping CUDA graph capture because pipeline parallel is "
@@ -482,7 +481,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
         elapsed_time = end_time - start_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
-        # This usually takes 5~20 seconds.
+        # 보통 5~20초가 소요됨.
         logger.info(
             "Graph capturing finished in %.0f secs, took %.2f GiB",
             elapsed_time,
@@ -491,8 +490,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return cuda_graph_size
 
     def warmup_for_prefill(self) -> None:
-        # For FlashInfer, we would like to execute a dummy prefill run
-        # to trigger JIT compilation.
+        # FlashInfer에서는 JIT 컴파일을 유도하기 위해 더미 prefill 실행이 필요함.
         if all("FLASHINFER" in b.get_name() for b in self.attn_backends.values()):
             self._dummy_run(self.max_num_tokens, skip_attn=False)
             torch.cuda.synchronize()
@@ -551,7 +549,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model_state.apply_staged_writes()
 
     def update_requests(self, scheduler_output: SchedulerOutput) -> None:
-        # Add new blocks for the existing requests.
+        # 기존 요청에 새 블록 추가.
         reqs = scheduler_output.scheduled_cached_reqs
         for req_new_block_ids, req_id in zip(reqs.new_block_ids, reqs.req_ids):
             if req_new_block_ids is not None:
@@ -568,7 +566,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
 
-        # Decode first, then prefill.
+        # 먼저 decode, 그다음 prefill.
         # batch_idx -> req_id
         req_ids = sorted(num_tokens_per_req, key=num_tokens_per_req.get)  # type: ignore[arg-type]
         numtoks_iter = map(num_tokens_per_req.get, req_ids)
@@ -578,10 +576,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.int32, count=num_reqs)
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
 
-        # Get the number of draft tokens for each request.
+        # 각 요청의 초안 토큰 수 계산.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         if not draft_tokens:
-            # No draft token scheduled (common case).
+            # 초안 토큰이 스케줄되지 않음 (일반적인 경우).
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
             cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
@@ -611,18 +609,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 idx_mapping, total_num_logits, cu_num_logits, max_expand_len
             )
 
-        # Get query_start_loc.
+        # query_start_loc 계산.
         query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
-        # Pad for full CUDA graph mode.
-        # Some attention backends like FA3 require query_start_loc to be non-decreasing.
+        # full CUDA 그래프 모드를 위한 패딩.
+        # FA3 같은 일부 attention backend는 query_start_loc가 비감소여야 함.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
         async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
         query_start_loc_np = query_start_loc_np[: num_reqs + 1]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
 
-        # Get prefill tokens if any.
+        # prefill 토큰이 있으면 준비.
         if self.req_states.any_prefills(idx_mapping_np):
             prepare_prefill_inputs(
                 self.input_buffers.input_ids,
@@ -634,7 +632,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states.num_computed_tokens.gpu,
             )
 
-        # Prepare positions and seq_lens.
+        # positions와 seq_lens 준비.
         prepare_pos_seq_lens(
             idx_mapping,
             query_start_loc,
@@ -646,7 +644,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         dcp_local_seq_lens = None
         if self.use_dcp:
-            # Prepare dcp local seq_lens.
+            # dcp 로컬 seq_lens 준비.
             prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
                 self.input_buffers.seq_lens,
@@ -657,8 +655,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs]
 
-        # Some input token ids are directly read from the last sampled tokens
-        # and draft tokens. Also, get the logits indices to sample tokens from.
+        # 일부 입력 토큰 ID는 마지막 샘플링 토큰과 초안 토큰에서 직접 읽음.
+        # 또한 토큰 샘플링에 사용할 logits 인덱스를 계산.
         logits_indices = combine_sampled_and_draft_tokens(
             self.input_buffers.input_ids,
             idx_mapping,
@@ -697,9 +695,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def prepare_attn(
         self, input_batch: InputBatch
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
+        # 블록 테이블: num_kv_cache_groups x [num_reqs, max_num_blocks]
         block_tables = self.block_tables.gather_block_tables(input_batch.idx_mapping)
-        # Compute slot mappings: [num_kv_cache_groups, num_tokens]
+        # 슬롯 매핑 계산: [num_kv_cache_groups, num_tokens]
         slot_mappings = self.block_tables.compute_slot_mappings(
             input_batch.idx_mapping,
             input_batch.query_start_loc,
@@ -727,7 +725,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         input_ids = input_batch.input_ids[input_batch.logits_indices]
         logits = self.model.compute_logits(sample_hidden_states)
         if grammar_output is not None:
-            # Apply grammar bitmask to the logits in-place.
+            # logits에 grammar 비트마스크를 in-place로 적용.
             self.structured_outputs_worker.apply_grammar_bitmask(
                 logits,
                 input_batch,
@@ -735,7 +733,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 grammar_output.grammar_bitmask,
             )
 
-        # Sample tokens and compute logprobs (if needed).
+        # 토큰 샘플링 및 (필요 시) logprobs 계산.
         sampler_output = self.sampler(
             logits,
             input_batch.expanded_idx_mapping,
@@ -747,12 +745,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         if input_batch.num_draft_tokens == 0:
-            # No draft tokens (common case).
+            # 초안 토큰 없음 (일반적인 경우).
             num_sampled = torch.ones(
                 input_batch.num_reqs, dtype=torch.int32, device=self.device
             )
         else:
-            # Rejection sampling for spec decoding.
+            # spec decoding용 rejection sampling.
             sampled_tokens, num_sampled = rejection_sample(
                 sampler_output.sampled_token_ids,
                 input_ids,
@@ -761,8 +759,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             sampler_output.sampled_token_ids = sampled_tokens
 
-        # Get the number of sampled and rejected tokens.
-        # For chunked prefills, num_sampled and num_rejected are both 0.
+        # 샘플링/거절된 토큰 수 계산.
+        # chunked prefill에서는 num_sampled와 num_rejected가 모두 0.
         num_sampled, num_rejected = get_num_sampled_and_rejected(
             num_sampled,
             input_batch.seq_lens,
@@ -779,7 +777,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
     ) -> None:
-        # Update the number of computed tokens.
+        # 계산된 토큰 수 업데이트.
         post_update(
             input_batch.idx_mapping,
             self.req_states.num_computed_tokens.gpu,
@@ -793,7 +791,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.total_len.gpu,
         )
 
-        # Update the number of computed prefill tokens.
+        # 계산된 prefill 토큰 수 업데이트.
         idx_mapping_np = input_batch.idx_mapping_np
         computed_prefill = self.req_states.num_computed_prefill_tokens
         computed_prefill[idx_mapping_np] += input_batch.num_scheduled_tokens
@@ -810,18 +808,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn_for_dummy_run: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
-            # Update the request states.
+            # 요청 상태 업데이트.
             self.finish_requests(scheduler_output)
             self.free_states(scheduler_output)
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
             if scheduler_output.total_num_scheduled_tokens == 0:
-                # No need to run the model.
+                # 모델 실행 불필요.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
                 return empty_output
 
-        # Get local cudagraph mode and size.
+        # 로컬 cudagraph 모드와 크기 계산.
         local_cudagraph_mode, local_cudagraph_size = (
             self.cudagraph_manager.get_cudagraph_runtime_mode(
                 num_reqs=len(scheduler_output.num_scheduled_tokens),
@@ -830,7 +828,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         )
 
-        # DP sync: num_tokens + cudagraph_size + cudagraph_mode
+        # DP 동기화: num_tokens + cudagraph_size + cudagraph_mode
         num_tokens_after_padding, num_tokens_across_dp, synced_cudagraph_mode = (
             get_cudagraph_and_dp_padding(
                 scheduler_output.total_num_scheduled_tokens,
@@ -842,20 +840,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         cudagraph_runtime_mode = CUDAGraphMode(synced_cudagraph_mode)
         if num_tokens_after_padding == 0:
-            # All DP ranks have zero tokens to run.
+            # 모든 DP rank에서 실행할 토큰이 0개.
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return empty_output
 
         if not dummy_run:
-            # Common case.
-            # Prepare all the inputs and copy to the input buffers.
+            # 일반적인 경우.
+            # 모든 입력을 준비해 입력 버퍼로 복사.
             input_batch = self.prepare_inputs(
                 scheduler_output, num_tokens_after_padding
             )
             block_tables, slot_mappings = self.prepare_attn(input_batch)
 
             if self.lora_config:
-                # Activate LoRA adapters.
+                # LoRA 어댑터 활성화.
                 lora_inputs = self.lora_state.make_lora_inputs(
                     input_batch.req_ids,
                     input_batch.idx_mapping_np,
@@ -863,7 +861,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 self._set_active_loras(*lora_inputs)
         else:
-            # No actual tokens to run. A dummy run for DP or memory profiling.
+            # 실제 실행 토큰 없음. DP 또는 메모리 프로파일링용 더미 실행.
             num_reqs = min(num_tokens_after_padding, self.max_num_reqs)
             input_batch = InputBatch.make_dummy(
                 num_reqs=num_reqs,
@@ -876,7 +874,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 block_tables = None
                 slot_mappings = None
-            # FIXME(woosuk): Fix warmup for LoRA.
+            # FIXME(woosuk): LoRA 워밍업 수정.
 
         attn_metadata = None
         slot_mappings_by_layer = None
@@ -896,8 +894,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         inputs_embeds = None
         if self.supports_mm_inputs and self.is_first_pp_rank and not dummy_run:
-            # Run MM encoder (if needed) and get multimodal embeddings.
-            # Only first PP rank prepares multimodal embeddings.
+            # (필요 시) MM 인코더를 실행하고 멀티모달 임베딩을 가져옴.
+            # 멀티모달 임베딩은 첫 번째 PP rank에서만 준비.
             inputs_embeds = self.model_state.get_mm_embeddings(
                 scheduler_output.scheduled_encoder_inputs,
                 input_batch,
@@ -908,21 +906,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             "input_ids": input_batch.input_ids,
             "positions": input_batch.positions,
             "inputs_embeds": inputs_embeds,
-            # NOTE: Values returned by `prepare_inputs` will override the default
-            # values above.
+            # NOTE: `prepare_inputs`가 반환한 값이 위 기본값을 덮어씀.
             **self.model_state.prepare_inputs(input_batch, self.req_states),
         }
         if not self.is_first_pp_rank:
-            # Update for non-first PP ranks.
+            # 첫 번째가 아닌 PP rank에 맞게 갱신.
             model_inputs["input_ids"] = None
             model_inputs["inputs_embeds"] = None
             model_inputs["intermediate_tensors"] = intermediate_tensors
 
-        # Run model.
+        # 모델 실행.
         if cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            # Use explicit cudagraph replay for FULL mode.
-            # NOTE(woosuk): Here, we don't need to pass the input tensors,
-            # because they are already copied to the CUDA graph input buffers.
+            # FULL 모드에서는 명시적 cudagraph replay 사용.
+            # NOTE(woosuk): 입력 텐서는 이미 CUDA 그래프 입력 버퍼로 복사되어
+            # 있으므로 여기서 별도로 전달할 필요가 없음.
             self.kv_connector.pre_forward(scheduler_output)
             model_output = self.cudagraph_manager.run_fullgraph(
                 input_batch.num_tokens_after_padding
@@ -933,7 +930,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states = model_output
                 aux_hidden_states = None
         else:
-            # For piecewise and eager mode, just call model().
+            # piecewise/eager 모드에서는 model()을 직접 호출.
             batch_descriptor = BatchDescriptor(
                 num_tokens=input_batch.num_tokens_after_padding,
                 has_lora=self.lora_config is not None,
@@ -968,11 +965,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         if not self.is_last_pp_rank:
-            # Non-last PP rank: return IntermediateTensors for sending.
+            # 마지막이 아닌 PP rank: 전송용 IntermediateTensors 반환.
             assert isinstance(hidden_states, IntermediateTensors)
             hidden_states.kv_connector_output = kv_connector_output
             return hidden_states
-        # Last rank (or no PP): hidden_states is a tensor for sampling.
+        # 마지막 rank(또는 PP 미사용): hidden_states는 샘플링용 텐서.
         assert isinstance(hidden_states, torch.Tensor)
         return None
 
@@ -981,7 +978,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self, grammar_output: GrammarOutput | None
     ) -> AsyncOutput | ModelRunnerOutput | None:
         if self.execute_model_state is None:
-            # The prior execute_model call must have failed.
+            # 직전 execute_model 호출이 실패한 경우.
             return None
         (
             input_batch,
@@ -995,22 +992,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
-            # Non-last PP rank: hidden_states is None because this rank produced
-            # IntermediateTensors instead of final hidden states. Receive the
-            # sampled tokens broadcast from the last rank and update local state.
+            # 마지막이 아닌 PP rank: 이 rank는 최종 hidden state 대신
+            # IntermediateTensors를 생성하므로 hidden_states가 None임.
+            # 마지막 rank에서 브로드캐스트된 샘플링 토큰을 받아 로컬 상태 업데이트.
             sampled, num_sampled, num_rejected = pp_receive(
                 input_batch.num_reqs, max_sample_len=self.num_speculative_steps + 1
             )
             self.postprocess(input_batch, sampled, num_sampled, num_rejected)
             return None
 
-        # Last rank: sample tokens
+        # 마지막 rank: 토큰 샘플링.
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
 
         if self.use_pp:
-            # Broadcast to non-last PP ranks (handles spec decode multi-token).
+            # 마지막이 아닌 PP rank로 브로드캐스트 (spec decode 멀티 토큰 처리).
             pp_broadcast(sampler_output.sampled_token_ids, num_sampled, num_rejected)
 
         prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
@@ -1024,11 +1021,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.num_computed_prefill_tokens,
         )
 
-        # Prepare the model runner output.
+        # 모델 러너 출력 준비.
         model_runner_output = ModelRunnerOutput(
             req_ids=input_batch.req_ids,
-            # NOTE(woosuk): req_id_to_index is unused in this model runner.
-            # Only for compatibility with the existing model runner and scheduler.
+            # NOTE(woosuk): 이 모델 러너에서는 req_id_to_index를 사용하지 않음.
+            # 기존 모델 러너/스케줄러와의 호환성만을 위해 유지.
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
@@ -1043,11 +1040,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_event=self.output_copy_event,
         )
 
-        # Postprocess results and update request states.
-        # NOTE: This is intentionally done after creating the AsyncOutput,
-        # ensuring that `copy_event` is recorded before calling postprocess.
-        # This sequencing may slightly reduce latency as async D2H copy does not
-        # need to wait for the postprocess to finish.
+        # 결과를 후처리하고 요청 상태를 업데이트.
+        # NOTE: 의도적으로 AsyncOutput 생성 이후에 수행하여
+        # postprocess 호출 전 `copy_event`가 기록되도록 보장함.
+        # 이 순서는 비동기 D2H 복사가 postprocess 완료를 기다릴 필요가 없어서
+        # 지연 시간을 약간 줄일 수 있음.
         self.postprocess(
             input_batch, sampler_output.sampled_token_ids, num_sampled, num_rejected
         )
@@ -1078,7 +1075,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     def pool(self) -> AsyncPoolingOutput | ModelRunnerOutput | None:
         if self.execute_model_state is None:
-            # The prior execute_model call must have failed.
+            # 직전 execute_model 호출이 실패한 경우.
             return None
 
         input_batch, _, _, _, hidden_states, _, kv_connector_output = (
@@ -1096,7 +1093,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.postprocess_pool(input_batch)
 
-        # Build the model runner output.
+        # 모델 러너 출력 생성.
         model_runner_output = ModelRunnerOutput(
             req_ids=input_batch.req_ids,
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
@@ -1115,14 +1112,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return async_output.get_output()
 
     def postprocess_pool(self, input_batch: InputBatch) -> None:
-        # Update the number of computed tokens.
+        # 계산된 토큰 수 업데이트.
         post_update_pool(
             input_batch.idx_mapping,
             self.req_states.num_computed_tokens.gpu,
             input_batch.query_start_loc,
         )
 
-        # Update the number of computed prefill tokens.
+        # 계산된 prefill 토큰 수 업데이트.
         idx_mapping_np = input_batch.idx_mapping_np
         computed_prefill = self.req_states.num_computed_prefill_tokens
         computed_prefill[idx_mapping_np] += input_batch.num_scheduled_tokens
